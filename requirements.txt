@@ -1,0 +1,5 @@
+streamlit
+google-cloud-aiplatform
+ddtrace
+graphviz
+python-dotenv
