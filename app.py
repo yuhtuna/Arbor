@@ -11,7 +11,7 @@ load_dotenv()
 PROJECT_ID = os.getenv("PROJECT_ID")
 DD_API_KEY = os.getenv("DD_API_KEY")
 MOCK_MODE = not PROJECT_ID or not DD_API_KEY or "your_" in PROJECT_ID or "your_" in DD_API_KEY
-
+MODEL = os.getenv("MODEL")
 if not MOCK_MODE:
     import vertexai
     from vertexai.generative_models import GenerativeModel
@@ -30,7 +30,7 @@ if not MOCK_MODE:
 
     # Initialize Google Vertex AI
     vertexai.init(project=PROJECT_ID, location="us-central1")
-    model = GenerativeModel("gemini-1.5-flash-001")
+    model = GenerativeModel(MODEL)
 else:
     print("WARNING: Running in MOCK MODE due to missing credentials.")
 
@@ -70,7 +70,10 @@ def llm_task(name):
     def decorator(func):
         if not MOCK_MODE:
             from ddtrace.llmobs import LLMObs
-            return LLMObs.task(name=name)(func)
+            def wrapper(*args, **kwargs):
+                with LLMObs.task(name=name):
+                    return func(*args, **kwargs)
+            return wrapper
         return func
     return decorator
 
