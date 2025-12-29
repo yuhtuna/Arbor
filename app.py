@@ -41,9 +41,14 @@ else:
 
 class MockGenerativeModel:
     def generate_content(self, prompt):
+        class MockUsage:
+            prompt_token_count = 50
+            candidates_token_count = 20
+
         class MockResponse:
             def __init__(self, text):
                 self.text = text
+                self.usage_metadata = MockUsage()
 
         prompt_str = str(prompt)
 
@@ -59,7 +64,6 @@ class MockGenerativeModel:
         if "Task: Route this input" in prompt_str:
             # Self-Healing Trigger
             if "drift" in prompt_str:
-                # Return a decision that indicates high drift
                 return MockResponse("DRIFT_RESET")
 
             if "cook" in prompt_str or "pasta" in prompt_str:
@@ -79,6 +83,64 @@ def llm_task(name):
             return LLMObs.task(name=name)(func)
         return func
     return decorator
+
+# --- OBSERVABILITY HELPERS ---
+
+def log_execution_metrics(response):
+    """
+    Extracts tokens and calculates cost for Datadog.
+    Pricing (Gemini Flash Approx):
+    Input: ~$0.00001875 per 1k characters
+    Output: ~$0.000075 per 1k characters
+    We estimate 1 token ~= 4 chars for cost calc.
+    """
+    if MOCK_MODE:
+        # We can still simulate the metrics logging in logs if we wanted,
+        # but the tracer isn't available.
+        return
+
+    from ddtrace import tracer
+
+    try:
+        usage = response.usage_metadata
+        input_tokens = usage.prompt_token_count
+        output_tokens = usage.candidates_token_count
+        total_tokens = input_tokens + output_tokens
+
+        # Calculate Cost (Approximate)
+        # 1 token approx 4 characters
+        input_cost = (input_tokens * 4 / 1000) * 0.00001875
+        output_cost = (output_tokens * 4 / 1000) * 0.000075
+        total_cost = input_cost + output_cost
+
+        span = tracer.current_span()
+        if span:
+            span.set_metric("arbor.tokens.input", input_tokens)
+            span.set_metric("arbor.tokens.output", output_tokens)
+            span.set_metric("arbor.tokens.total", total_tokens)
+            span.set_metric("arbor.cost.usd", total_cost)
+
+    except Exception as e:
+        print(f"Error logging metrics: {e}")
+
+def check_jailbreak(text):
+    """
+    Security Layer: Checks for prompt injection attempts.
+    """
+    forbidden = ["ignore your instructions", "system override", "ignore previous instructions"]
+    text_lower = text.lower()
+
+    for phrase in forbidden:
+        if phrase in text_lower:
+            if not MOCK_MODE:
+                from ddtrace import tracer
+                span = tracer.current_span()
+                if span:
+                    span.set_tag("error", "true")
+                    span.set_tag("error.message", "Prompt Injection Attempt")
+                    span.set_metric("arbor.security.jailbreak_attempt", 1)
+            return True
+    return False
 
 def get_active_lineage(branch_name):
     """
@@ -100,9 +162,12 @@ def get_active_lineage(branch_name):
 @llm_task(name="fact_extractor")
 def extract_global_facts(user_input):
     """
-    Background task: Scans input for permanent user facts (Name, Job, Skills)
-    to store in the 'Root' node for global context.
+    Background task: Scans input for permanent user facts.
     """
+    # Security Check
+    if check_jailbreak(user_input):
+        return []
+
     prompt = f"""
     Analyze this text: "{user_input}"
     Extract any permanent facts about the USER (Name, Age, Job, Skills, Location).
@@ -111,11 +176,14 @@ def extract_global_facts(user_input):
     """
     try:
         if MOCK_MODE:
-            response = MockGenerativeModel().generate_content(prompt).text
+            response_obj = MockGenerativeModel().generate_content(prompt)
         else:
-            response = model.generate_content(prompt).text
+            response_obj = model.generate_content(prompt)
 
-        clean_json = response.replace("```json", "").replace("```", "").strip()
+        log_execution_metrics(response_obj)
+        response_text = response_obj.text
+
+        clean_json = response_text.replace("```json", "").replace("```", "").strip()
         facts = json.loads(clean_json)
 
         if facts and not MOCK_MODE:
@@ -129,8 +197,11 @@ def extract_global_facts(user_input):
 def route_topic(user_input, current_branch, all_branches):
     """
     Core Logic: Decides if we STAY, SWITCH branch, or CREATE new branch.
-    Also calculates Drift Score for Self-Healing.
     """
+    # Security Check
+    if check_jailbreak(user_input):
+        return "STAY" # Or handle specifically, but staying is safe.
+
     prompt = f"""
     Current Active Branch: '{current_branch}'
     Existing Branches: {all_branches}
@@ -147,17 +218,15 @@ def route_topic(user_input, current_branch, all_branches):
     drift_score = 0.1 # Default low drift
 
     if MOCK_MODE:
-        response = MockGenerativeModel().generate_content(prompt).text.strip()
+        response_obj = MockGenerativeModel().generate_content(prompt)
+        log_execution_metrics(response_obj)
+        response = response_obj.text.strip()
         if response == "DRIFT_RESET":
             drift_score = 0.9
     else:
-        response = model.generate_content(prompt).text.strip()
-        # In real mode, we might ask the model for a score, but for now
-        # let's assume if it creates a new branch, drift is medium,
-        # but if we had a specific "Drift" prompt, we'd use that.
-        # For this Hackathon implementation, we'll keep it simple:
-        # If the model explicitly says "RESET" (not standard) or if we add logic here.
-        # Given the prompt doesn't ask for score, we simulate it based on keywords or decision.
+        response_obj = model.generate_content(prompt)
+        log_execution_metrics(response_obj)
+        response = response_obj.text.strip()
         if "RESET" in response:
              drift_score = 0.9
 
@@ -188,8 +257,11 @@ def get_ai_response(user_input, global_context, lineage_history):
     """
     Generates answer using Lineage History + Global Root Facts.
     """
+    # Security Check
+    if check_jailbreak(user_input):
+        return "I cannot ignore my core instructions."
+
     context_str = "\n".join(global_context)
-    # Use the full lineage history
     history_str = "\n".join([f"{m['role']}: {m['content']}" for m in lineage_history[-10:]])
 
     prompt = f"""
@@ -200,8 +272,12 @@ def get_ai_response(user_input, global_context, lineage_history):
     Answer naturally.
     """
     if MOCK_MODE:
-        return MockGenerativeModel().generate_content(prompt).text
-    return model.generate_content(prompt).text
+        response_obj = MockGenerativeModel().generate_content(prompt)
+    else:
+        response_obj = model.generate_content(prompt)
+
+    log_execution_metrics(response_obj)
+    return response_obj.text
 
 # ---------------------------------------------------------
 # 3. UI LAYER (Streamlit)
@@ -277,6 +353,35 @@ for msg in st.session_state.nodes[st.session_state.current_branch]["history"]:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
+# Feedback Callback
+def handle_feedback():
+    if "feedback_key" in st.session_state and st.session_state.feedback_key:
+        fb = st.session_state.feedback_key
+        # 'thumbs' returns {'score': '👍'/'👎'} or similar depending on version,
+        # but st.feedback('thumbs') usually returns 1 (up) or 0 (down) in new versions,
+        # or we check documentation. Assuming standard Streamlit:
+        # Actually st.feedback is very new (1.37+). It often returns an index or value.
+
+        score = 0.0
+        # If it returns 1 for up, 0 for down
+        if fb == 1: # Thumbs Up
+            score = 1.0
+            metric_name = "arbor.feedback.positive"
+        else: # Thumbs Down (0)
+            score = 0.0
+            metric_name = "arbor.feedback.negative"
+
+        if not MOCK_MODE:
+            from ddtrace import tracer
+            from ddtrace.llmobs import LLMObs
+            # We treat feedback as an event
+            span = tracer.trace("arbor.user_feedback")
+            span.set_metric(metric_name, 1)
+            LLMObs.annotate(tags={"evaluation.quality": score})
+            span.finish()
+
+        st.toast("Thanks for your feedback!")
+
 # Input Loop
 if prompt := st.chat_input("What's on your mind?"):
     with st.chat_message("user"):
@@ -297,10 +402,8 @@ if prompt := st.chat_input("What's on your mind?"):
         # Self-Healing Action
         target_branch = "ROOT"
         st.toast("⚠️ High Context Drift Detected! Resetting to Root...", icon="🚨")
-        # Optional: We could also choose to "Switch" to ROOT, but resetting current_branch implies moving focus.
     elif "CREATE:" in decision:
         new_name = decision.split(":")[1]
-        # Arbor 2.0: Assign parent as the current branch
         st.session_state.nodes[new_name] = {
             "history": [],
             "parent": st.session_state.current_branch
@@ -322,4 +425,12 @@ if prompt := st.chat_input("What's on your mind?"):
 
     st.session_state.nodes[target_branch]["history"].append({"role": "user", "content": prompt})
     st.session_state.nodes[target_branch]["history"].append({"role": "assistant", "content": resp})
+
+    # Rerun to update state and show feedback for the NEW message
     st.rerun()
+
+# Show feedback widget for the LAST message if it was from assistant
+# We place this outside the input loop so it persists
+current_hist = st.session_state.nodes[st.session_state.current_branch]["history"]
+if current_hist and current_hist[-1]["role"] == "assistant":
+    st.feedback("thumbs", key="feedback_key", on_change=handle_feedback)
