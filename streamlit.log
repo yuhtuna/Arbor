@@ -1,3 +1,93 @@
+WARNING: Running in MOCK MODE due to missing credentials.
+WARNING: Running in MOCK MODE due to missing credentials.
+DEBUG MOCK PROMPT:
+    Analyze this text: "I like to cook pasta"
+    Extract any permanent facts about the USER (Name, Age, Job, Skills, Location).
+    Return ONLY a JSON list of short strings. If none, return [].
+    Example: ["User is 22", "User knows Python"]
+
+DEBUG MOCK PROMPT:
+    Task: Route the input to the best branch.
+
+    Current Branch: 'Start'
+    Existing Branches: ['Start']
+    User Input: "I like to cook pasta"
+
+    DECISION LOGIC (Strict Order):
+    1. **STAY**: Does the input fit directly into 'Start'? -> Return "STAY"
+    2. **SWITCH**: Is there an EXISTING branch in ['Start'] that matches? -> Return "SWITCH:BranchName"
+    3. **CREATE**: Only if COMPLETELY NEW topic -> Return "CREATE:DescriptiveName"
+
+    NAMING RULES (Critical for CREATE):
+    - Must be a **Specific Subject** (e.g., "Python AsyncIO", "Grilled Salmon").
+    - **FORBIDDEN:** "New Topic", "New Experience", "Chat", "General".
+    - Max 3 words.
+
+    Return ONLY the decision string.
+
+DEBUG MOCK PROMPT:
+    SYSTEM: You are Arbor, a memory-augmented AI.
+    GLOBAL CONTEXT (User Facts): User Session Started
+User knows Python
+    CURRENT CONVERSATION:
+    User: I like to cook pasta
+    Answer naturally.
+
+WARNING: Running in MOCK MODE due to missing credentials.
+WARNING: Running in MOCK MODE due to missing credentials.
+DEBUG MOCK PROMPT:
+    Analyze this text: "reset"
+    Extract any permanent facts about the USER (Name, Age, Job, Skills, Location).
+    Return ONLY a JSON list of short strings. If none, return [].
+    Example: ["User is 22", "User knows Python"]
+
+DEBUG MOCK PROMPT:
+    SYSTEM: You are Arbor, a memory-augmented AI.
+    GLOBAL CONTEXT (User Facts): User Session Started
+User knows Python
+User knows Python
+    CURRENT CONVERSATION:
+    User: reset
+    Answer naturally.
+
+WARNING: Running in MOCK MODE due to missing credentials.
+WARNING: Running in MOCK MODE due to missing credentials.
+WARNING: Running in MOCK MODE due to missing credentials.
+DEBUG MOCK PROMPT:
+    Analyze this text: "I like to cook pasta"
+    Extract any permanent facts about the USER (Name, Age, Job, Skills, Location).
+    Return ONLY a JSON list of short strings. If none, return [].
+    Example: ["User is 22", "User knows Python"]
+
+DEBUG MOCK PROMPT:
+    Task: Route the input to the best branch.
+
+    Current Branch: 'Start'
+    Existing Branches: ['Start']
+    User Input: "I like to cook pasta"
+
+    DECISION LOGIC (Strict Order):
+    1. **STAY**: Does the input fit directly into 'Start'? -> Return "STAY"
+    2. **SWITCH**: Is there an EXISTING branch in ['Start'] that matches? -> Return "SWITCH:BranchName"
+    3. **CREATE**: Only if COMPLETELY NEW topic -> Return "CREATE:DescriptiveName"
+
+    NAMING RULES (Critical for CREATE):
+    - Must be a **Specific Subject** (e.g., "Python AsyncIO", "Grilled Salmon").
+    - **FORBIDDEN:** "New Topic", "New Experience", "Chat", "General".
+    - Max 3 words.
+
+    Return ONLY the decision string.
+
+DEBUG MOCK PROMPT:
+    SYSTEM: You are Arbor, a memory-augmented AI.
+    GLOBAL CONTEXT (User Facts): User Session Started
+User knows Python
+    CURRENT CONVERSATION:
+    User: I like to cook pasta
+    Answer naturally.
+
+WARNING: Running in MOCK MODE due to missing credentials.
+  Stopping...
 
 Collecting usage statistics. To deactivate, set browser.gatherUsageStats to false.
 

@@ -51,7 +51,7 @@ class MockGenerativeModel:
                 self.usage_metadata = MockUsage()
 
         prompt_str = str(prompt)
-        print(f"DEBUG MOCK PROMPT: {prompt_str}") # Debug print
+        # Debugging print removed to keep logs clean
 
         # 1. Fact Extraction Mock
         if "Extract any permanent facts" in prompt_str:
@@ -86,12 +86,8 @@ def llm_task(name):
 def log_execution_metrics(response):
     """
     Extracts tokens and calculates cost for Datadog.
+    Also updates Session State for UI display.
     """
-    if MOCK_MODE:
-        return
-
-    from ddtrace import tracer
-
     try:
         usage = response.usage_metadata
         input_tokens = usage.prompt_token_count
@@ -100,16 +96,27 @@ def log_execution_metrics(response):
 
         # Calculate Cost (Approximate)
         # 1 token approx 4 characters
+        # Input: $0.00001875 per 1k chars
+        # Output: $0.000075 per 1k chars
         input_cost = (input_tokens * 4 / 1000) * 0.00001875
         output_cost = (output_tokens * 4 / 1000) * 0.000075
         total_cost = input_cost + output_cost
 
-        span = tracer.current_span()
-        if span:
-            span.set_metric("arbor.tokens.input", input_tokens)
-            span.set_metric("arbor.tokens.output", output_tokens)
-            span.set_metric("arbor.tokens.total", total_tokens)
-            span.set_metric("arbor.cost.usd", total_cost)
+        # Update Session State for UI
+        if "total_tokens" in st.session_state:
+            st.session_state.total_tokens += total_tokens
+        if "total_cost" in st.session_state:
+            st.session_state.total_cost += total_cost
+
+        # Datadog Metrics
+        if not MOCK_MODE:
+            from ddtrace import tracer
+            span = tracer.current_span()
+            if span:
+                span.set_metric("arbor.tokens.input", input_tokens)
+                span.set_metric("arbor.tokens.output", output_tokens)
+                span.set_metric("arbor.tokens.total", total_tokens)
+                span.set_metric("arbor.cost.usd", total_cost)
 
     except Exception as e:
         print(f"Error logging metrics: {e}")
@@ -196,10 +203,13 @@ def route_topic(user_input, current_branch, all_branches):
         return "STAY"
 
     # --- LAYER 1: SELF-HEALING (Drift Detection) ---
-    drift_score = 0.0
+    drift_score = 0.1 # Default low drift (High Trust)
     # Simulate high drift for demo/mock purposes
     if "reset" in user_input.lower() or "ignore" in user_input.lower() or "drift" in user_input.lower():
         drift_score = 0.95
+
+    # Save for UI Badge
+    st.session_state.last_drift_score = drift_score
 
     # Log the metric to Datadog
     if not MOCK_MODE:
@@ -300,6 +310,14 @@ if "nodes" not in st.session_state:
     }
     st.session_state.current_branch = "Start"
 
+# Initialize Metrics in Session State
+if "total_tokens" not in st.session_state:
+    st.session_state.total_tokens = 0
+if "total_cost" not in st.session_state:
+    st.session_state.total_cost = 0.0
+if "last_drift_score" not in st.session_state:
+    st.session_state.last_drift_score = 0.1 # Default safe
+
 # Determine Active Path for Visualization
 active_path = set()
 curr = st.session_state.current_branch
@@ -350,6 +368,15 @@ with st.sidebar:
             graph.edge(parent, name, color=edge_color, penwidth=edge_width)
 
     st.graphviz_chart(graph)
+
+    # --- FINOPS WIDGET ---
+    st.divider()
+    st.subheader("💰 FinOps & Usage")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Session Tokens", f"{st.session_state.total_tokens}")
+    with col2:
+        st.metric("Est. Cost", f"${st.session_state.total_cost:.6f}")
 
 # Chat Interface
 st.title("Arbor")
@@ -424,6 +451,15 @@ if prompt := st.chat_input("What's on your mind?"):
 
     # 3. Respond
     with st.chat_message("assistant"):
+        # --- TRUST BADGE ---
+        drift = st.session_state.get("last_drift_score", 0.1)
+        if drift < 0.2:
+            st.markdown("🛡️ **Verified Context**", unsafe_allow_html=True)
+        elif drift <= 0.8:
+            st.markdown("🤔 **Context Bridging**", unsafe_allow_html=True)
+        else:
+            st.markdown("⚠️ **Context Drift Detected**", unsafe_allow_html=True)
+
         # Arbor 2.0: Get active lineage history
         lineage_history = get_active_lineage(target_branch)
         resp = get_ai_response(prompt, st.session_state.nodes["ROOT"]["facts"], lineage_history)
