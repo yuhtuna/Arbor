@@ -6,11 +6,13 @@ import random
 from dotenv import load_dotenv
 
 # 1. SETUP & CONFIG
-load_dotenv()
+load_dotenv(override=True)
 
 # Detect Mock Mode
 PROJECT_ID = os.getenv("PROJECT_ID")
 DD_API_KEY = os.getenv("DD_API_KEY")
+DD_SITE = os.getenv("DD_SITE")
+
 MOCK_MODE = not PROJECT_ID or not DD_API_KEY or "your_" in PROJECT_ID or "your_" in DD_API_KEY
 MODEL = os.getenv("MODEL")
 if not MOCK_MODE:
@@ -26,7 +28,7 @@ if not MOCK_MODE:
         LLMObs.enable(
             ml_app=os.getenv("DD_SERVICE"),
             api_key=DD_API_KEY,
-            site=os.getenv("DD_SITE")
+            site=DD_SITE
         )
 
     # Initialize Google Vertex AI
