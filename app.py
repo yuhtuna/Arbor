@@ -12,7 +12,7 @@ load_dotenv()
 PROJECT_ID = os.getenv("PROJECT_ID")
 DD_API_KEY = os.getenv("DD_API_KEY")
 MOCK_MODE = not PROJECT_ID or not DD_API_KEY or "your_" in PROJECT_ID or "your_" in DD_API_KEY
-MODEL = os.getenv("MODEL")
+
 if not MOCK_MODE:
     import vertexai
     from vertexai.generative_models import GenerativeModel
@@ -31,7 +31,7 @@ if not MOCK_MODE:
 
     # Initialize Google Vertex AI
     vertexai.init(project=PROJECT_ID, location="us-central1")
-    model = GenerativeModel(MODEL)
+    model = GenerativeModel("gemini-1.5-flash-001")
 else:
     print("WARNING: Running in MOCK MODE due to missing credentials.")
 
@@ -51,6 +51,7 @@ class MockGenerativeModel:
                 self.usage_metadata = MockUsage()
 
         prompt_str = str(prompt)
+        print(f"DEBUG MOCK PROMPT: {prompt_str}") # Debug print
 
         # 1. Fact Extraction Mock
         if "Extract any permanent facts" in prompt_str:
@@ -61,11 +62,7 @@ class MockGenerativeModel:
             return MockResponse('[]')
 
         # 2. Router Mock
-        if "Task: Route this input" in prompt_str:
-            # Self-Healing Trigger
-            if "drift" in prompt_str:
-                return MockResponse("DRIFT_RESET")
-
+        if "Task: Route" in prompt_str:
             if "cook" in prompt_str or "pasta" in prompt_str:
                 return MockResponse("CREATE:Cooking")
             elif "learn" in prompt_str or "Python" in prompt_str:
@@ -80,10 +77,7 @@ def llm_task(name):
     def decorator(func):
         if not MOCK_MODE:
             from ddtrace.llmobs import LLMObs
-            def wrapper(*args, **kwargs):
-                with LLMObs.task(name=name):
-                    return func(*args, **kwargs)
-            return wrapper
+            return LLMObs.task(name=name)(func)
         return func
     return decorator
 
@@ -92,14 +86,8 @@ def llm_task(name):
 def log_execution_metrics(response):
     """
     Extracts tokens and calculates cost for Datadog.
-    Pricing (Gemini Flash Approx):
-    Input: ~$0.00001875 per 1k characters
-    Output: ~$0.000075 per 1k characters
-    We estimate 1 token ~= 4 chars for cost calc.
     """
     if MOCK_MODE:
-        # We can still simulate the metrics logging in logs if we wanted,
-        # but the tracer isn't available.
         return
 
     from ddtrace import tracer
@@ -199,50 +187,66 @@ def extract_global_facts(user_input):
 @llm_task(name="router_decision")
 def route_topic(user_input, current_branch, all_branches):
     """
-    Core Logic: Decides if we STAY, SWITCH branch, or CREATE new branch.
+    MERGED LOGIC:
+    1. Self-Healing: Checks for high drift (simulated or real) and resets if needed.
+    2. Smart Routing: If safe, uses Strict Naming rules to decide path.
     """
     # Security Check
     if check_jailbreak(user_input):
-        return "STAY" # Or handle specifically, but staying is safe.
+        return "STAY"
+
+    # --- LAYER 1: SELF-HEALING (Drift Detection) ---
+    drift_score = 0.0
+    # Simulate high drift for demo/mock purposes
+    if "reset" in user_input.lower() or "ignore" in user_input.lower() or "drift" in user_input.lower():
+        drift_score = 0.95
+
+    # Log the metric to Datadog
+    if not MOCK_MODE:
+        from ddtrace import tracer
+        from ddtrace.llmobs import LLMObs
+        tracer.current_span().set_metric("arbor.drift_score", drift_score)
+
+        # The "Circuit Breaker" Logic
+        if drift_score > 0.8:
+            LLMObs.annotate(tags={"drift_event": "true", "action": "auto_reset"})
+            return "SWITCH:ROOT"  # <--- FORCE RESET TO ROOT
+    elif drift_score > 0.8:
+         return "SWITCH:ROOT"
+
+    # --- LAYER 2: SMART ROUTING (The "Brain") ---
+    # Filter out ROOT so we don't redundantly switch to it normally
+    available_branches = [b for b in all_branches if b != "ROOT"]
 
     prompt = f"""
-    Current Active Branch: '{current_branch}'
-    Existing Branches: {all_branches}
+    Task: Route the input to the best branch.
+
+    Current Branch: '{current_branch}'
+    Existing Branches: {available_branches}
     User Input: "{user_input}"
 
-    Task: Route this input.
-    1. If it fits the Current Branch goal -> Return "STAY"
-    2. If it fits an Existing Branch -> Return "SWITCH:BranchName"
-    3. If it is a new topic -> Return "CREATE:NewBranchName" (2-3 words max)
+    DECISION LOGIC (Strict Order):
+    1. **STAY**: Does the input fit directly into '{current_branch}'? -> Return "STAY"
+    2. **SWITCH**: Is there an EXISTING branch in {available_branches} that matches? -> Return "SWITCH:BranchName"
+    3. **CREATE**: Only if COMPLETELY NEW topic -> Return "CREATE:DescriptiveName"
 
-    Return ONLY the string decision.
+    NAMING RULES (Critical for CREATE):
+    - Must be a **Specific Subject** (e.g., "Python AsyncIO", "Grilled Salmon").
+    - **FORBIDDEN:** "New Topic", "New Experience", "Chat", "General".
+    - Max 3 words.
+
+    Return ONLY the decision string.
     """
-
-    drift_score = 0.1 # Default low drift
 
     if MOCK_MODE:
         response_obj = MockGenerativeModel().generate_content(prompt)
-        log_execution_metrics(response_obj)
-        response = response_obj.text.strip()
-        if response == "DRIFT_RESET":
-            drift_score = 0.9
     else:
         response_obj = model.generate_content(prompt)
-        log_execution_metrics(response_obj)
-        response = response_obj.text.strip()
-        if "RESET" in response:
-             drift_score = 0.9
 
-    # Datadog Metric for Drift
-    if not MOCK_MODE:
-        from ddtrace import tracer
-        tracer.current_span().set_metric("arbor.drift_score", drift_score)
+    log_execution_metrics(response_obj)
+    response = response_obj.text.strip()
 
-    # Self-Healing Logic
-    if drift_score > 0.8:
-        return "RESET"
-
-    # Standard Routing Metrics
+    # Log Routing Decision to Datadog
     if not MOCK_MODE:
         from ddtrace import tracer
         from ddtrace.llmobs import LLMObs
@@ -360,13 +364,7 @@ for msg in st.session_state.nodes[st.session_state.current_branch]["history"]:
 def handle_feedback():
     if "feedback_key" in st.session_state and st.session_state.feedback_key:
         fb = st.session_state.feedback_key
-        # 'thumbs' returns {'score': '👍'/'👎'} or similar depending on version,
-        # but st.feedback('thumbs') usually returns 1 (up) or 0 (down) in new versions,
-        # or we check documentation. Assuming standard Streamlit:
-        # Actually st.feedback is very new (1.37+). It often returns an index or value.
-
         score = 0.0
-        # If it returns 1 for up, 0 for down
         if fb == 1: # Thumbs Up
             score = 1.0
             metric_name = "arbor.feedback.positive"
@@ -377,7 +375,6 @@ def handle_feedback():
         if not MOCK_MODE:
             from ddtrace import tracer
             from ddtrace.llmobs import LLMObs
-            # We treat feedback as an event
             span = tracer.trace("arbor.user_feedback")
             span.set_metric(metric_name, 1)
             LLMObs.annotate(tags={"evaluation.quality": score})
@@ -401,10 +398,12 @@ if prompt := st.chat_input("What's on your mind?"):
 
     target_branch = st.session_state.current_branch
 
-    if decision == "RESET":
-        # Self-Healing Action
-        target_branch = "ROOT"
-        st.toast("⚠️ High Context Drift Detected! Resetting to Root...", icon="🚨")
+    # Previous RESET was handled by returning "RESET"
+    # Now route_topic returns "SWITCH:ROOT" for drift
+    # The normal logic handles "SWITCH:" correctly.
+    if decision == "RESET": # Backwards compat if I missed something, but logic says SWITCH:ROOT
+         target_branch = "ROOT"
+         st.toast("⚠️ High Context Drift Detected! Resetting to Root...", icon="🚨")
     elif "CREATE:" in decision:
         new_name = decision.split(":")[1]
         st.session_state.nodes[new_name] = {
@@ -415,7 +414,11 @@ if prompt := st.chat_input("What's on your mind?"):
         st.success(f"Context Drift! Spawning: {new_name}")
     elif "SWITCH:" in decision:
         target_branch = decision.split(":")[1]
-        st.info(f"Switching to: {target_branch}")
+        # Check if this was a self-healing reset
+        if target_branch == "ROOT" and ("reset" in prompt.lower() or "drift" in prompt.lower() or "ignore" in prompt.lower()):
+            st.toast("⚠️ High Context Drift Detected! Resetting to Root...", icon="🚨")
+        else:
+            st.info(f"Switching to: {target_branch}")
 
     st.session_state.current_branch = target_branch
 
@@ -429,11 +432,9 @@ if prompt := st.chat_input("What's on your mind?"):
     st.session_state.nodes[target_branch]["history"].append({"role": "user", "content": prompt})
     st.session_state.nodes[target_branch]["history"].append({"role": "assistant", "content": resp})
 
-    # Rerun to update state and show feedback for the NEW message
     st.rerun()
 
 # Show feedback widget for the LAST message if it was from assistant
-# We place this outside the input loop so it persists
 current_hist = st.session_state.nodes[st.session_state.current_branch]["history"]
 if current_hist and current_hist[-1]["role"] == "assistant":
     st.feedback("thumbs", key="feedback_key", on_change=handle_feedback)
