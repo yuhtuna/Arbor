@@ -72,17 +72,17 @@ def llm_task(name):
     def decorator(func):
         if not MOCK_MODE:
             from ddtrace.llmobs import LLMObs
-            return LLMObs.task(name=name)(func)
+            def wrapper(*args, **kwargs):
+                with LLMObs.task(name=name):
+                    return func(*args, **kwargs)
+            return wrapper
         return func
     return decorator
 
 # --- OBSERVABILITY HELPERS ---
 
 def log_execution_metrics(response):
-    """def wrapper(*args, **kwargs):
-                with LLMObs.task(name=name):
-                    return func(*args, **kwargs)
-            return wrapper
+    """
     Extracts tokens and calculates cost for Datadog.
     Also updates Session State for UI display.
     """
