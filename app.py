@@ -212,13 +212,13 @@ def route_topic(user_input, current_branch, all_branches):
     Existing Branches: {available_branches}
     User Input: "{user_input}"
 
-    STEP 1: Rate "Relevance" (0-10) of Input to '{current_branch}'.
-    - 10 = Perfect fit.
-    - 0 = Completely unrelated.
+    STEP 1: Rate "Relevance" (0-10).
+    - **CRITICAL RULE:** If Current Branch is 'Start' or 'ROOT' and input is a specific topic (like Cooking, Coding, etc.), Relevance MUST be < 3.
+    - Otherwise, rate based on semantic fit (10 = Perfect, 0 = Unrelated).
 
     STEP 2: Decide Action.
-    - If Relevance > 6: STAY.
-    - If Relevance < 4: Check Existing Branches. If match -> SWITCH. Else -> CREATE.
+    - If Relevance >= 6: STAY.
+    - If Relevance < 6: Check Existing Branches. If match -> SWITCH. Else -> CREATE.
 
     NAMING RULES for CREATE:
     - Specific Subject (e.g., "Python AsyncIO"). Max 3 words. No "New Topic".
@@ -228,19 +228,41 @@ def route_topic(user_input, current_branch, all_branches):
     """
 
     if MOCK_MODE:
-        # Mocking the smart logic for testing
-        is_drift = "cook" in user_input.lower() or "reset" in user_input.lower()
-        mock_score = 2 if is_drift else 9
-        mock_decision = "CREATE:Cooking" if "cook" in user_input.lower() else "STAY"
-        # If reset trigger, force low score but maybe not create cooking?
+        # 1. Define Triggers
+        # Added "reset" to triggers to capture it
+        topic_triggers = ["cook", "resume", "job", "python", "reset"]
+        is_new_topic = any(t in user_input.lower() for t in topic_triggers)
+
+        # 2. Determine Branching Name (if needed)
+        new_branch_name = "New Topic"
+        if "cook" in user_input.lower(): new_branch_name = "Cooking"
+        elif "resume" in user_input.lower() or "job" in user_input.lower(): new_branch_name = "Resume Help"
+        elif "python" in user_input.lower(): new_branch_name = "Python Dev"
+
+        # 3. Calculate Score & Decision
         if "reset" in user_input.lower():
-             # Logic says if score < 4 and no match -> CREATE?
-             # But reset keyword implies we want to simulate the 'reset' scenario.
-             # In prev logic: drift > 0.8 => SWITCH:ROOT.
-             # Here drift = 1 - (2/10) = 0.8.
-             # To force > 0.8, score needs to be 1 or 0.
-             mock_score = 1
-             mock_decision = "STAY" # Decision doesn't matter if drift overrides it below?
+            # Force Critical Drift -> Triggers SWITCH:ROOT in the main logic below
+            mock_score = 1
+            mock_decision = "STAY" # Decision ignored because drift > 0.8 triggers override
+
+        elif current_branch == "Start" and is_new_topic:
+            # FIX: Force jump from Start
+            mock_score = 2
+            mock_decision = f"CREATE:{new_branch_name}"
+
+        elif is_new_topic and new_branch_name not in current_branch:
+             # Logic for switching betwen branches (e.g. Cooking -> Resume)
+             mock_score = 3
+             mock_decision = f"SWITCH:{new_branch_name}" # Or CREATE if it doesn't exist yet
+             # For simplicity in Mock, we can just say CREATE.
+             # The Router Prompt logic usually handles check vs create,
+             # but here we force a 'drift' score so the main logic acts.
+             mock_decision = f"CREATE:{new_branch_name}"
+
+        else:
+             # Standard "Good Fit"
+             mock_score = 9
+             mock_decision = "STAY"
 
         response_text = json.dumps({"decision": mock_decision, "relevance_score": mock_score})
 
