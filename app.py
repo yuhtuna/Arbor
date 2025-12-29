@@ -12,7 +12,7 @@ load_dotenv(override=True)
 PROJECT_ID = os.getenv("PROJECT_ID")
 DD_API_KEY = os.getenv("DD_API_KEY")
 DD_SITE = os.getenv("DD_SITE")
-
+MODEL = os.getenv("MODEL")
 MOCK_MODE = not PROJECT_ID or not DD_API_KEY or "your_" in PROJECT_ID or "your_" in DD_API_KEY
 
 if not MOCK_MODE:
@@ -33,7 +33,7 @@ if not MOCK_MODE:
 
     # Initialize Google Vertex AI
     vertexai.init(project=PROJECT_ID, location="us-central1")
-    model = GenerativeModel("gemini-1.5-flash-001")
+    model = GenerativeModel(MODEL)
 else:
     print("WARNING: Running in MOCK MODE due to missing credentials.")
 
