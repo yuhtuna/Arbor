@@ -460,18 +460,18 @@ if prompt := st.chat_input("What's on your mind?"):
         drift = st.session_state.get("last_drift_score", 0.0)
         relevance = (1.0 - drift) * 10.0
 
-        # STRICTER LOGIC: Raise threshold from 5 to 7.5
-        # We only want to drill down if it is a STRICT sub-topic.
-        if relevance > 7.5:
+        # TUNING FIX: Lower threshold from 7.5 to 6.0
+        # This allows "Related Steps" (Veggies -> Noodles) to become children,
+        # but keeps "Unrelated Topics" (Resume -> Noodles) as siblings.
+        if relevance > 6.0:
             parent_node = st.session_state.current_branch
             st.success(f"Drilling down: {st.session_state.current_branch} → {new_name}")
         else:
-            # Default to ROOT for loose connections (Sibling Branch)
-            # Exception: If current is ROOT/Start, new node is always a child of them.
+            # Default to Start for loose connections
             if st.session_state.current_branch in ["ROOT", "Start"]:
                  parent_node = st.session_state.current_branch
             else:
-                 parent_node = "Start" # Or "ROOT" depending on your preference
+                 parent_node = "Start"
 
             st.toast(f"New Branch Created: {new_name}", icon="🌿")
 
