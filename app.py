@@ -3,7 +3,6 @@ import graphviz
 import json
 import os
 import random
-import numpy as np
 from dotenv import load_dotenv
 
 # 1. SETUP & CONFIG
@@ -37,7 +36,7 @@ vertexai.init(project=PROJECT_ID, location="us-central1")
 model = GenerativeModel(MODEL)
 
 # Load the lightweight embedding model
-embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
+embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
 
 def get_embedding(text):
     """Generates a vector for the given text."""
@@ -425,20 +424,24 @@ if prompt := st.chat_input("What's on your mind?"):
     elif "CREATE:" in decision:
         new_name = decision.split(":")[1]
 
-        # SMART PARENTING LOGIC
-        # Retrieve the score we calculated in route_topic
-        # (Drift = 1 - Relevance/10), so Relevance = (1 - Drift) * 10
+        # Calculate Relevance from Drift (Relevance = (1-Drift)*10)
         drift = st.session_state.get("last_drift_score", 0.0)
         relevance = (1.0 - drift) * 10.0
 
-        # If the new topic is highly relevant to current context (>5), it's a CHILD.
-        # If it's unrelated (<5), it's a NEW ROOT BRANCH.
-        if relevance > 5:
+        # STRICTER LOGIC: Raise threshold from 5 to 7.5
+        # We only want to drill down if it is a STRICT sub-topic.
+        if relevance > 7.5:
             parent_node = st.session_state.current_branch
             st.success(f"Drilling down: {st.session_state.current_branch} → {new_name}")
         else:
-            parent_node = "ROOT"
-            st.toast(f"New Topic Detected: {new_name}", icon="🌱")
+            # Default to ROOT for loose connections (Sibling Branch)
+            # Exception: If current is ROOT/Start, new node is always a child of them.
+            if st.session_state.current_branch in ["ROOT", "Start"]:
+                 parent_node = st.session_state.current_branch
+            else:
+                 parent_node = "Start" # Or "ROOT" depending on your preference
+
+            st.toast(f"New Branch Created: {new_name}", icon="🌿")
 
         st.session_state.nodes[new_name] = {
             "history": [],
