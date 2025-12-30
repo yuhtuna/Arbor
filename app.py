@@ -8,75 +8,39 @@ from dotenv import load_dotenv
 # 1. SETUP & CONFIG
 load_dotenv()
 
-# Detect Mock Mode
+# Detect Mode
 PROJECT_ID = os.getenv("PROJECT_ID")
 DD_API_KEY = os.getenv("DD_API_KEY")
 DD_SITE = os.getenv("DD_SITE")
 MODEL = os.getenv("MODEL")
-MOCK_MODE = not PROJECT_ID or not DD_API_KEY or "your_" in PROJECT_ID or "your_" in DD_API_KEY
 
-if not MOCK_MODE:
-    import vertexai
-    from vertexai.generative_models import GenerativeModel
-    from ddtrace import tracer, patch_all
-    from ddtrace.llmobs import LLMObs
+import vertexai
+from vertexai.generative_models import GenerativeModel
+from ddtrace import tracer, patch_all
+from ddtrace.llmobs import LLMObs
 
-    patch_all()
+patch_all()
 
-    # Initialize Datadog
-    if DD_API_KEY:
-        LLMObs.enable(
-            ml_app=os.getenv("DD_SERVICE"),
-            api_key=DD_API_KEY,
-            site=os.getenv("DD_SITE")
-        )
+# Initialize Datadog
+if DD_API_KEY:
+    LLMObs.enable(
+        ml_app=os.getenv("DD_SERVICE"),
+        api_key=DD_API_KEY,
+        site=os.getenv("DD_SITE")
+    )
 
-    # Initialize Google Vertex AI
-    vertexai.init(project=PROJECT_ID, location="us-central1")
-    model = GenerativeModel(MODEL)
-else:
-    print("WARNING: Running in MOCK MODE due to missing credentials.")
-
-# ---------------------------------------------------------
-# 2. INTELLIGENCE LAYERS (The "Brain")
-# ---------------------------------------------------------
-
-class MockGenerativeModel:
-    def generate_content(self, prompt):
-        class MockUsage:
-            prompt_token_count = 50
-            candidates_token_count = 20
-
-        class MockResponse:
-            def __init__(self, text):
-                self.text = text
-                self.usage_metadata = MockUsage()
-
-        prompt_str = str(prompt)
-
-        # 1. Fact Extraction Mock
-        if "Extract any permanent facts" in prompt_str:
-            if "Python" in prompt_str:
-                return MockResponse('["User knows Python"]')
-            elif "cook" in prompt_str or "pasta" in prompt_str:
-                return MockResponse('["User likes cooking"]')
-            return MockResponse('[]')
-
-        # 2. Router Mock (Note: The main routing logic is now inside route_topic mock handling directly
-        # but extract_facts still uses this)
-        # We'll keep this as fallback
-        return MockResponse("This is a mock response from Arbor (Mock Mode).")
+# Initialize Google Vertex AI
+vertexai.init(project=PROJECT_ID, location="us-central1")
+model = GenerativeModel(MODEL)
 
 # Wrapper to handle LLM tasks conditionally
 def llm_task(name):
     def decorator(func):
-        if not MOCK_MODE:
-            from ddtrace.llmobs import LLMObs
-            def wrapper(*args, **kwargs):
-                with LLMObs.task(name=name):
-                    return func(*args, **kwargs)
-            return wrapper
-        return func
+        from ddtrace.llmobs import LLMObs
+        def wrapper(*args, **kwargs):
+            with LLMObs.task(name=name):
+                return func(*args, **kwargs)
+        return wrapper
     return decorator
 
 # --- OBSERVABILITY HELPERS ---
@@ -112,14 +76,13 @@ def log_execution_metrics(response):
         st.session_state.tokens_saved += saved_estimate
 
         # Datadog Metrics
-        if not MOCK_MODE:
-            from ddtrace import tracer
-            span = tracer.current_span()
-            if span:
-                span.set_metric("arbor.tokens.input", input_tokens)
-                span.set_metric("arbor.tokens.output", output_tokens)
-                span.set_metric("arbor.tokens.total", total_tokens)
-                span.set_metric("arbor.cost.usd", total_cost)
+        from ddtrace import tracer
+        span = tracer.current_span()
+        if span:
+            span.set_metric("arbor.tokens.input", input_tokens)
+            span.set_metric("arbor.tokens.output", output_tokens)
+            span.set_metric("arbor.tokens.total", total_tokens)
+            span.set_metric("arbor.cost.usd", total_cost)
 
     except Exception as e:
         print(f"Error logging metrics: {e}")
@@ -133,13 +96,12 @@ def check_jailbreak(text):
 
     for phrase in forbidden:
         if phrase in text_lower:
-            if not MOCK_MODE:
-                from ddtrace import tracer
-                span = tracer.current_span()
-                if span:
-                    span.set_tag("error", "true")
-                    span.set_tag("error.message", "Prompt Injection Attempt")
-                    span.set_metric("arbor.security.jailbreak_attempt", 1)
+            from ddtrace import tracer
+            span = tracer.current_span()
+            if span:
+                span.set_tag("error", "true")
+                span.set_tag("error.message", "Prompt Injection Attempt")
+                span.set_metric("arbor.security.jailbreak_attempt", 1)
             return True
     return False
 
@@ -176,10 +138,7 @@ def extract_global_facts(user_input):
     Example: ["User is 22", "User knows Python"]
     """
     try:
-        if MOCK_MODE:
-            response_obj = MockGenerativeModel().generate_content(prompt)
-        else:
-            response_obj = model.generate_content(prompt)
+        response_obj = model.generate_content(prompt)
 
         log_execution_metrics(response_obj)
         response_text = response_obj.text
@@ -187,7 +146,7 @@ def extract_global_facts(user_input):
         clean_json = response_text.replace("```json", "").replace("```", "").strip()
         facts = json.loads(clean_json)
 
-        if facts and not MOCK_MODE:
+        if facts:
             from ddtrace import tracer
             tracer.current_span().set_metric("arbor.facts_learned", len(facts))
         return facts
@@ -227,63 +186,9 @@ def route_topic(user_input, current_branch, all_branches):
     Return JSON ONLY: {{"decision": "STAY/SWITCH:Name/CREATE:Name", "relevance_score": 7}}
     """
 
-    if MOCK_MODE:
-        # 1. Define Triggers
-        # Added "reset" to triggers to capture it
-        topic_triggers = ["cook", "resume", "job", "python", "reset"]
-        is_new_topic = any(t in user_input.lower() for t in topic_triggers)
-
-        # 2. Determine Branching Name (if needed)
-        new_branch_name = "New Topic"
-        if "cook" in user_input.lower(): new_branch_name = "Cooking"
-        elif "resume" in user_input.lower() or "job" in user_input.lower(): new_branch_name = "Resume Help"
-        elif "python" in user_input.lower(): new_branch_name = "Python Dev"
-
-        # 3. Calculate Score & Decision
-        if "reset" in user_input.lower():
-            # Force Critical Drift -> Triggers SWITCH:ROOT in the main logic below
-            mock_score = 1
-            mock_decision = "STAY" # Decision ignored because drift > 0.8 triggers override
-
-        elif current_branch == "Start" and is_new_topic:
-            # FIX: Force jump from Start
-            mock_score = 2
-            mock_decision = f"CREATE:{new_branch_name}"
-
-        elif is_new_topic and new_branch_name not in current_branch:
-             # Logic for switching betwen branches (e.g. Cooking -> Resume)
-             mock_score = 3
-             mock_decision = f"SWITCH:{new_branch_name}" # Or CREATE if it doesn't exist yet
-             # For simplicity in Mock, we can just say CREATE.
-             # The Router Prompt logic usually handles check vs create,
-             # but here we force a 'drift' score so the main logic acts.
-             mock_decision = f"CREATE:{new_branch_name}"
-
-        else:
-             # Standard "Good Fit"
-             mock_score = 9
-             mock_decision = "STAY"
-
-        response_text = json.dumps({"decision": mock_decision, "relevance_score": mock_score})
-
-        # Simulate Logging Metrics for Mock
-        # We need a response object to pass to log_execution_metrics
-        class MockResponse:
-            def __init__(self, text):
-                self.text = text
-                # Simple mock usage
-                class MockUsage:
-                    prompt_token_count = 50
-                    candidates_token_count = 20
-                self.usage_metadata = MockUsage()
-
-        response_obj = MockResponse(response_text)
-        log_execution_metrics(response_obj)
-
-    else:
-        response_obj = model.generate_content(prompt)
-        log_execution_metrics(response_obj)
-        response_text = response_obj.text.strip().replace("```json", "").replace("```", "")
+    response_obj = model.generate_content(prompt)
+    log_execution_metrics(response_obj)
+    response_text = response_obj.text.strip().replace("```json", "").replace("```", "")
 
     try:
         data = json.loads(response_text)
@@ -302,12 +207,11 @@ def route_topic(user_input, current_branch, all_branches):
     st.session_state.last_drift_score = drift_score
 
     # Log to Datadog
-    if not MOCK_MODE:
-        from ddtrace import tracer
-        from ddtrace.llmobs import LLMObs
-        tracer.current_span().set_metric("arbor.drift_score", drift_score)
-        if drift_score > 0.8:
-            LLMObs.annotate(tags={"drift_event": "true"})
+    from ddtrace import tracer
+    from ddtrace.llmobs import LLMObs
+    tracer.current_span().set_metric("arbor.drift_score", drift_score)
+    if drift_score > 0.8:
+        LLMObs.annotate(tags={"drift_event": "true"})
 
     # Self-Healing: Force Reset if Drift is Critical
     # The prompt logic returns a decision, but if drift is too high, we override.
@@ -335,10 +239,7 @@ def get_ai_response(user_input, global_context, lineage_history):
     User: {user_input}
     Answer naturally.
     """
-    if MOCK_MODE:
-        response_obj = MockGenerativeModel().generate_content(prompt)
-    else:
-        response_obj = model.generate_content(prompt)
+    response_obj = model.generate_content(prompt)
 
     log_execution_metrics(response_obj)
     return response_obj.text
@@ -377,8 +278,6 @@ while curr:
 # Sidebar: Visual Tree
 with st.sidebar:
     st.header("🧠 Memory Topology")
-    if MOCK_MODE:
-        st.warning("⚠️ Running in Mock Mode (No valid API Keys detected)")
 
     graph = graphviz.Digraph()
     graph.attr(rankdir='TB')
@@ -465,13 +364,12 @@ def handle_feedback():
             score = 0.0
             metric_name = "arbor.feedback.negative"
 
-        if not MOCK_MODE:
-            from ddtrace import tracer
-            from ddtrace.llmobs import LLMObs
-            span = tracer.trace("arbor.user_feedback")
-            span.set_metric(metric_name, 1)
-            LLMObs.annotate(tags={"evaluation.quality": score})
-            span.finish()
+        from ddtrace import tracer
+        from ddtrace.llmobs import LLMObs
+        span = tracer.trace("arbor.user_feedback")
+        span.set_metric(metric_name, 1)
+        LLMObs.annotate(tags={"evaluation.quality": score})
+        span.finish()
 
         st.toast("Thanks for your feedback!")
 
@@ -500,12 +398,27 @@ if prompt := st.chat_input("What's on your mind?"):
 
     elif "CREATE:" in decision:
         new_name = decision.split(":")[1]
+
+        # SMART PARENTING LOGIC
+        # Retrieve the score we calculated in route_topic
+        # (Drift = 1 - Relevance/10), so Relevance = (1 - Drift) * 10
+        drift = st.session_state.get("last_drift_score", 0.0)
+        relevance = (1.0 - drift) * 10.0
+
+        # If the new topic is highly relevant to current context (>5), it's a CHILD.
+        # If it's unrelated (<5), it's a NEW ROOT BRANCH.
+        if relevance > 5:
+            parent_node = st.session_state.current_branch
+            st.success(f"Drilling down: {st.session_state.current_branch} → {new_name}")
+        else:
+            parent_node = "ROOT"
+            st.toast(f"New Topic Detected: {new_name}", icon="🌱")
+
         st.session_state.nodes[new_name] = {
             "history": [],
-            "parent": st.session_state.current_branch
+            "parent": parent_node
         }
         target_branch = new_name
-        st.success(f"Context Drift! Spawning: {new_name}")
 
     st.session_state.current_branch = target_branch
 
