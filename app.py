@@ -279,6 +279,25 @@ while curr:
 with st.sidebar:
     st.header("🧠 Memory Topology")
 
+    st.header("🕰️ Context Time Travel")
+
+    # Get all available branches
+    all_branches = list(st.session_state.nodes.keys())
+
+    # Create a Selectbox to manually jump branches
+    # Default to current_branch
+    selected_branch = st.selectbox(
+        "Jump to Topic:",
+        all_branches,
+        index=all_branches.index(st.session_state.current_branch)
+    )
+
+    # Logic: If user changes the dropdown, FORCE a switch
+    if selected_branch != st.session_state.current_branch:
+        st.session_state.current_branch = selected_branch
+        st.toast(f"⏳ Time Travelled to: {selected_branch}", icon="🚀")
+        st.rerun()
+
     graph = graphviz.Digraph()
     graph.attr(rankdir='TB')
 
