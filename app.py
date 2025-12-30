@@ -460,14 +460,39 @@ if prompt := st.chat_input("What's on your mind?"):
         drift = st.session_state.get("last_drift_score", 0.0)
         relevance = (1.0 - drift) * 10.0
 
-        # TUNING FIX: Lower threshold from 7.5 to 6.0
-        # This allows "Related Steps" (Veggies -> Noodles) to become children,
-        # but keeps "Unrelated Topics" (Resume -> Noodles) as siblings.
+        # DEFAULT DECISION: Based on Thresholds
+        is_child = False
+
+        # Case 1: Clear Match (High Trust)
         if relevance > 6.0:
+            is_child = True
+
+        # Case 2: The "Gray Zone" (Ambiguous)
+        # Score is between 5.0 and 6.0 (e.g., your 59% Resume/Intern case)
+        elif relevance > 5.0:
+            # TIE-BREAKER: Ask the "Brain" (LLM) for a second opinion
+            # This is slower but much smarter than a raw vector check.
+            check_prompt = f"""
+            Task: Parenting Check.
+            Is the new topic '{new_name}' a direct sub-step or detail of '{st.session_state.current_branch}'?
+            Context: The user is switching from '{st.session_state.current_branch}' to '{new_name}'.
+            Answer YES or NO only.
+            """
+            try:
+                # Quick call to Gemini
+                check_resp = model.generate_content(check_prompt).text.strip().upper()
+                if "YES" in check_resp:
+                    is_child = True
+                    st.toast("🧠 AI Tie-Breaker: Connected related topics!", icon="🔗")
+            except:
+                is_child = False
+
+        # EXECUTE DECISION
+        if is_child:
             parent_node = st.session_state.current_branch
             st.success(f"Drilling down: {st.session_state.current_branch} → {new_name}")
         else:
-            # Default to Start for loose connections
+            # Sibling Logic
             if st.session_state.current_branch in ["ROOT", "Start"]:
                  parent_node = st.session_state.current_branch
             else:
