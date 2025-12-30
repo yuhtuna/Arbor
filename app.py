@@ -38,7 +38,7 @@ model = GenerativeModel(MODEL)
 # Load the lightweight embedding model
 embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
 
-def get_batch_embeddings(texts):
+def get_batch_embeddings(texts, task_type="RETRIEVAL_DOCUMENT"):
     """
     Generates vectors for a LIST of texts in ONE API call.
     This avoids hitting the '5 Requests Per Minute' limit.
@@ -50,6 +50,7 @@ def get_batch_embeddings(texts):
 
     try:
         # Batch Call: Sends all texts at once!
+        # Note: auto_truncate is True by default which handles long texts
         embeddings = embedding_model.get_embeddings(valid_texts)
         return [e.values for e in embeddings]
     except Exception as e:
@@ -186,28 +187,19 @@ def extract_global_facts(user_input):
 @llm_task(name="router_decision")
 def route_topic(user_input, current_branch, all_branches):
     """
-    ARBOR 3.0: Embedding-Based Semantic Router (High Efficiency).
+    ARBOR 4.0: Indexed Routing (Maximum Efficiency).
     """
-    # Security Check
     if check_jailbreak(user_input): return "STAY"
 
-    # PREPARE BATCH: [User Input, Current Branch, ...All Other Branches]
-    # We combine everything into one list to make exactly 1 API call.
-    batch_texts = [user_input, current_branch] + [b for b in all_branches if b != "ROOT" and b != current_branch]
+    # 1. Embed User Input (The ONLY API Call we make now!)
+    input_vec = get_batch_embeddings([user_input], task_type="RETRIEVAL_QUERY")[0]
 
-    # EXECUTE BATCH (1 Request!)
-    vectors = get_batch_embeddings(batch_texts)
+    # 2. Retrieve Cached Vectors (Zero Cost)
+    # Get current branch vector from memory
+    current_vec = st.session_state.nodes[current_branch].get("vector")
 
-    # Unpack the results
-    input_vec = vectors[0]
-    current_vec = vectors[1]
-    other_branch_vecs = vectors[2:]
-    other_branch_names = [b for b in all_branches if b != "ROOT" and b != current_branch]
-
-    # 3. Calculate Relevance to Current Branch
+    # 3. Calculate Drift (Math only)
     relevance = cosine_similarity(input_vec, current_vec)
-
-    # Drift Score (Inverse of Similarity)
     drift_score = 1.0 - relevance
     st.session_state.last_drift_score = drift_score
 
@@ -215,28 +207,33 @@ def route_topic(user_input, current_branch, all_branches):
     from ddtrace import tracer
     tracer.current_span().set_metric("arbor.drift_score", drift_score)
 
-    # 4. Decision Logic (Math instead of LLM)
-    # Thresholds: >0.6 is usually "Relevant", <0.4 is "Different Topic"
-    if relevance > 0.6:
+    # 4. Decision Logic (Same Tuned Thresholds)
+    if relevance > 0.45:
         return "STAY"
 
-    # If not staying, check other branches
+    # Search the Index
     best_match = None
     best_score = -1.0
 
-    for branch, branch_vec in zip(other_branch_names, other_branch_vecs):
+    for branch in all_branches:
+        if branch == "ROOT" or branch == current_branch: continue
+
+        # RETRIEVE FROM INDEX (Fast!)
+        branch_vec = st.session_state.nodes[branch].get("vector")
+
+        # Safety check if vector is missing
+        if branch_vec is None: continue
+
         score = cosine_similarity(input_vec, branch_vec)
 
         if score > best_score:
             best_score = score
             best_match = branch
 
-    # If we found a better existing branch
-    if best_score > 0.65:
+    if best_score > 0.55:
         return f"SWITCH:{best_match}"
 
-    # If nothing matches, we need to create, but Embeddings can't "Name" things.
-    # FALLBACK: Use LLM *only* to name the new topic (Cost saving: we only call LLM 10% of time)
+    # Fallback to Name Generation
     name_prompt = f"Name the topic of this input in 2-3 words: '{user_input}'"
     new_name = model.generate_content(name_prompt).text.strip()
 
@@ -274,9 +271,22 @@ st.set_page_config(layout="wide", page_title="Arbor")
 
 # Session State Initialization
 if "nodes" not in st.session_state:
+    # Generate initial index for default nodes
+    root_vec = get_batch_embeddings(["ROOT"], task_type="RETRIEVAL_DOCUMENT")[0]
+    start_vec = get_batch_embeddings(["Start"], task_type="RETRIEVAL_DOCUMENT")[0]
+
     st.session_state.nodes = {
-        "ROOT": {"facts": ["User Session Started"], "history": [], "parent": None},
-        "Start": {"history": [], "parent": "ROOT"}
+        "ROOT": {
+            "facts": ["User Session Started"],
+            "history": [],
+            "parent": None,
+            "vector": root_vec  # <--- INDEXED!
+        },
+        "Start": {
+            "history": [],
+            "parent": "ROOT",
+            "vector": start_vec # <--- INDEXED!
+        }
     }
     st.session_state.current_branch = "Start"
 
@@ -459,9 +469,13 @@ if prompt := st.chat_input("What's on your mind?"):
 
             st.toast(f"New Branch Created: {new_name}", icon="🌿")
 
+        # INDEXING STEP: Generate vector for the new name immediately
+        new_vec = get_batch_embeddings([new_name], task_type="RETRIEVAL_DOCUMENT")[0]
+
         st.session_state.nodes[new_name] = {
             "history": [],
-            "parent": parent_node
+            "parent": parent_node,
+            "vector": new_vec  # <--- Store it for future lookups
         }
         target_branch = new_name
 
