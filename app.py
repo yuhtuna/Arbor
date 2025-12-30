@@ -16,6 +16,8 @@ MODEL = os.getenv("MODEL")
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
+from vertexai.language_models import TextEmbeddingModel
+import numpy as np
 from ddtrace import tracer, patch_all
 from ddtrace.llmobs import LLMObs
 
@@ -32,6 +34,22 @@ if DD_API_KEY:
 # Initialize Google Vertex AI
 vertexai.init(project=PROJECT_ID, location="us-central1")
 model = GenerativeModel(MODEL)
+
+# Load the lightweight embedding model
+embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+
+def get_embedding(text):
+    """Generates a vector for the given text."""
+    if not text: return np.zeros(768)
+
+    embeddings = embedding_model.get_embeddings([text])
+    return embeddings[0].values
+
+def cosine_similarity(a, b):
+    """Calculates semantic similarity (0 to 1)."""
+    if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0:
+        return 0.0
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 # Wrapper to handle LLM tasks conditionally
 def llm_task(name):
@@ -156,69 +174,57 @@ def extract_global_facts(user_input):
 @llm_task(name="router_decision")
 def route_topic(user_input, current_branch, all_branches):
     """
-    ARBOR 2.5 LOGIC: Calculates REAL Semantic Drift based on relevance.
+    ARBOR 3.0: Embedding-Based Semantic Router (High Efficiency).
     """
     # Security Check
     if check_jailbreak(user_input): return "STAY"
 
-    # Filter out ROOT
-    available_branches = [b for b in all_branches if b != "ROOT"]
+    # 1. Vectorize Input
+    input_vec = get_embedding(user_input)
 
-    prompt = f"""
-    Task: Route the input and rate Relevance to the Current Branch.
+    # 2. Vectorize Current Branch (Cache this in real app, generates on fly here)
+    current_vec = get_embedding(current_branch)
 
-    Current Branch: '{current_branch}'
-    Existing Branches: {available_branches}
-    User Input: "{user_input}"
+    # 3. Calculate Relevance to Current Branch
+    relevance = cosine_similarity(input_vec, current_vec)
 
-    STEP 1: Rate "Relevance" (0-10).
-    - **CRITICAL RULE:** If Current Branch is 'Start' or 'ROOT' and input is a specific topic (like Cooking, Coding, etc.), Relevance MUST be < 3.
-    - Otherwise, rate based on semantic fit (10 = Perfect, 0 = Unrelated).
-
-    STEP 2: Decide Action.
-    - If Relevance >= 6: STAY.
-    - If Relevance < 6: Check Existing Branches. If match -> SWITCH. Else -> CREATE.
-
-    NAMING RULES for CREATE:
-    - Specific Subject (e.g., "Python AsyncIO"). Max 3 words. No "New Topic".
-
-    OUTPUT FORMAT:
-    Return JSON ONLY: {{"decision": "STAY/SWITCH:Name/CREATE:Name", "relevance_score": 7}}
-    """
-
-    response_obj = model.generate_content(prompt)
-    log_execution_metrics(response_obj)
-    response_text = response_obj.text.strip().replace("```json", "").replace("```", "")
-
-    try:
-        data = json.loads(response_text)
-        decision = data.get("decision", "STAY")
-        relevance = data.get("relevance_score", 10)
-
-        # Calculate Drift (Inverse of Relevance)
-        # Relevance 10 -> Drift 0.0 (Safe)
-        # Relevance 2  -> Drift 0.8 (Danger)
-        drift_score = 1.0 - (relevance / 10.0)
-    except:
-        decision = "STAY"
-        drift_score = 0.1
-
-    # Save for UI
+    # Drift Score (Inverse of Similarity)
+    drift_score = 1.0 - relevance
     st.session_state.last_drift_score = drift_score
 
     # Log to Datadog
     from ddtrace import tracer
-    from ddtrace.llmobs import LLMObs
     tracer.current_span().set_metric("arbor.drift_score", drift_score)
-    if drift_score > 0.8:
-        LLMObs.annotate(tags={"drift_event": "true"})
 
-    # Self-Healing: Force Reset if Drift is Critical
-    # The prompt logic returns a decision, but if drift is too high, we override.
-    if drift_score > 0.8:
-        return "SWITCH:ROOT"
+    # 4. Decision Logic (Math instead of LLM)
+    # Thresholds: >0.6 is usually "Relevant", <0.4 is "Different Topic"
+    if relevance > 0.6:
+        return "STAY"
 
-    return decision
+    # If not staying, check other branches
+    best_match = None
+    best_score = -1.0
+
+    for branch in all_branches:
+        if branch == "ROOT" or branch == current_branch: continue
+
+        branch_vec = get_embedding(branch)
+        score = cosine_similarity(input_vec, branch_vec)
+
+        if score > best_score:
+            best_score = score
+            best_match = branch
+
+    # If we found a better existing branch
+    if best_score > 0.65:
+        return f"SWITCH:{best_match}"
+
+    # If nothing matches, we need to create, but Embeddings can't "Name" things.
+    # FALLBACK: Use LLM *only* to name the new topic (Cost saving: we only call LLM 10% of time)
+    name_prompt = f"Name the topic of this input in 2-3 words: '{user_input}'"
+    new_name = model.generate_content(name_prompt).text.strip()
+
+    return f"CREATE:{new_name}"
 
 @llm_task(name="generate_response")
 def get_ai_response(user_input, global_context, lineage_history):
