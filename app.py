@@ -214,7 +214,7 @@ def route_topic(user_input, current_branch, all_branches):
     tracer.current_span().set_metric("arbor.drift_score", smoothed_drift)
 
     # 4. Decision Logic (Same Tuned Thresholds)
-    if relevance > 0.45:
+    if relevance > 0.6:
         return "STAY"
 
     # Search the Index
