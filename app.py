@@ -36,14 +36,26 @@ vertexai.init(project=PROJECT_ID, location="us-central1")
 model = GenerativeModel(MODEL)
 
 # Load the lightweight embedding model
-embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
+embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
 
-def get_embedding(text):
-    """Generates a vector for the given text."""
-    if not text: return np.zeros(768)
+def get_batch_embeddings(texts):
+    """
+    Generates vectors for a LIST of texts in ONE API call.
+    This avoids hitting the '5 Requests Per Minute' limit.
+    """
+    if not texts: return []
 
-    embeddings = embedding_model.get_embeddings([text])
-    return embeddings[0].values
+    # Clean empty strings to avoid API errors
+    valid_texts = [t if t else " " for t in texts]
+
+    try:
+        # Batch Call: Sends all texts at once!
+        embeddings = embedding_model.get_embeddings(valid_texts)
+        return [e.values for e in embeddings]
+    except Exception as e:
+        print(f"Embedding Error: {e}")
+        # Fallback to empty vectors if batch fails
+        return [np.zeros(768) for _ in valid_texts]
 
 def cosine_similarity(a, b):
     """Calculates semantic similarity (0 to 1)."""
@@ -179,11 +191,18 @@ def route_topic(user_input, current_branch, all_branches):
     # Security Check
     if check_jailbreak(user_input): return "STAY"
 
-    # 1. Vectorize Input
-    input_vec = get_embedding(user_input)
+    # PREPARE BATCH: [User Input, Current Branch, ...All Other Branches]
+    # We combine everything into one list to make exactly 1 API call.
+    batch_texts = [user_input, current_branch] + [b for b in all_branches if b != "ROOT" and b != current_branch]
 
-    # 2. Vectorize Current Branch (Cache this in real app, generates on fly here)
-    current_vec = get_embedding(current_branch)
+    # EXECUTE BATCH (1 Request!)
+    vectors = get_batch_embeddings(batch_texts)
+
+    # Unpack the results
+    input_vec = vectors[0]
+    current_vec = vectors[1]
+    other_branch_vecs = vectors[2:]
+    other_branch_names = [b for b in all_branches if b != "ROOT" and b != current_branch]
 
     # 3. Calculate Relevance to Current Branch
     relevance = cosine_similarity(input_vec, current_vec)
@@ -205,10 +224,7 @@ def route_topic(user_input, current_branch, all_branches):
     best_match = None
     best_score = -1.0
 
-    for branch in all_branches:
-        if branch == "ROOT" or branch == current_branch: continue
-
-        branch_vec = get_embedding(branch)
+    for branch, branch_vec in zip(other_branch_names, other_branch_vecs):
         score = cosine_similarity(input_vec, branch_vec)
 
         if score > best_score:
