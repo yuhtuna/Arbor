@@ -199,7 +199,17 @@ def route_topic(user_input, current_branch, all_branches):
     current_vec = st.session_state.nodes[current_branch].get("vector")
 
     # 3. Calculate Drift (Math only)
-    relevance = cosine_similarity(input_vec, current_vec)
+    raw_relevance = cosine_similarity(input_vec, current_vec)
+
+    # INERTIA LOGIC (The Fix):
+    # If we are deep in a topic (not in Start/ROOT), give a "Home Court Advantage".
+    # This prevents specific details (e.g. "Toyota") from drifting out of general topics ("Car Repair").
+    if current_branch not in ["ROOT", "Start"]:
+        # Add a 15% bonus to sticking with the current topic
+        relevance = min(1.0, raw_relevance + 0.15)
+    else:
+        relevance = raw_relevance
+
     instant_drift = 1.0 - relevance
 
     # Apply MOMENTUM (Exponential Moving Average)
