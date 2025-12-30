@@ -36,7 +36,7 @@ vertexai.init(project=PROJECT_ID, location="us-central1")
 model = GenerativeModel(MODEL)
 
 # Load the lightweight embedding model
-embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
 
 def get_batch_embeddings(texts, task_type="RETRIEVAL_DOCUMENT"):
     """
@@ -56,7 +56,7 @@ def get_batch_embeddings(texts, task_type="RETRIEVAL_DOCUMENT"):
     except Exception as e:
         print(f"Embedding Error: {e}")
         # Fallback to empty vectors if batch fails
-        return [np.zeros(768) for _ in valid_texts]
+        return [np.zeros(3072) for _ in valid_texts]
 
 def cosine_similarity(a, b):
     """Calculates semantic similarity (0 to 1)."""
