@@ -200,12 +200,18 @@ def route_topic(user_input, current_branch, all_branches):
 
     # 3. Calculate Drift (Math only)
     relevance = cosine_similarity(input_vec, current_vec)
-    drift_score = 1.0 - relevance
-    st.session_state.last_drift_score = drift_score
+    instant_drift = 1.0 - relevance
+
+    # Apply MOMENTUM (Exponential Moving Average)
+    prev_drift = st.session_state.get("last_drift_score", 0.0)
+    alpha = 0.3 # 30% new info, 70% history
+    smoothed_drift = (prev_drift * (1 - alpha)) + (instant_drift * alpha)
+
+    st.session_state.last_drift_score = smoothed_drift
 
     # Log to Datadog
     from ddtrace import tracer
-    tracer.current_span().set_metric("arbor.drift_score", drift_score)
+    tracer.current_span().set_metric("arbor.drift_score", smoothed_drift)
 
     # 4. Decision Logic (Same Tuned Thresholds)
     if relevance > 0.45:
@@ -470,7 +476,16 @@ if prompt := st.chat_input("What's on your mind?"):
             st.toast(f"New Branch Created: {new_name}", icon="🌿")
 
         # INDEXING STEP: Generate vector for the new name immediately
-        new_vec = get_batch_embeddings([new_name], task_type="RETRIEVAL_DOCUMENT")[0]
+        # PATH-AWARENESS LOGIC:
+        # Instead of embedding just "Sauce", we embed "Cooking > Pasta > Sauce".
+        # This ensures the child vector inherits the semantic context of the parent.
+
+        if parent_node and parent_node not in ["ROOT", "Start"]:
+            contextual_text = f"{parent_node} {new_name}"
+        else:
+            contextual_text = new_name
+
+        new_vec = get_batch_embeddings([contextual_text], task_type="RETRIEVAL_DOCUMENT")[0]
 
         st.session_state.nodes[new_name] = {
             "history": [],
