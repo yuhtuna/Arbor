@@ -36,7 +36,7 @@ vertexai.init(project=PROJECT_ID, location="us-central1")
 model = GenerativeModel(MODEL)
 
 # Load the lightweight embedding model
-embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
 
 def get_embedding(text):
     """Generates a vector for the given text."""
