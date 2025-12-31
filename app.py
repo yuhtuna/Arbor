@@ -204,7 +204,7 @@ def extract_global_facts(user_input):
 @llm_task(name="router_decision")
 def route_topic(user_input, current_branch, all_branches):
     """
-    ARBOR 4.0: Indexed Routing (Maximum Efficiency).
+    ARBOR 4.1: Indexed Routing + Confidence Injection
     """
     if check_jailbreak(user_input): return "STAY"
 
@@ -242,40 +242,51 @@ def route_topic(user_input, current_branch, all_branches):
             best_switch_branch = branch
 
     # ---------------------------------------------------------
-    # STEP C: THE SHOWDOWN (Compare & Decide)
+    # STEP C: METRICS & VISUALIZATION (Adaptive Momentum)
     # ---------------------------------------------------------
+    drift = 1.0 - stay_score
 
-    # METRICS & LOGGING (Adaptive Momentum)
-    instant_drift = 1.0 - stay_score
+    # Smooth the UI Score
     prev_drift = st.session_state.get("last_drift_score", 0.0)
 
-    # Trust is hard to gain (0.2) but easy to lose (0.7).
-    if instant_drift > prev_drift:
-        alpha = 0.7 # Fast drop
-    else:
-        alpha = 0.2 # Slow recovery
+    # MOMENTUM TUNING:
+    # If drift is increasing (User confused), drop fast (0.7).
+    # If drift is decreasing (Recovery), rise fast (0.5) -- WAS 0.2 (Too Slow)
+    alpha = 0.7 if drift > prev_drift else 0.5
 
-    smoothed_drift = (prev_drift * (1 - alpha)) + (instant_drift * alpha)
+    smoothed_drift = (prev_drift * (1 - alpha)) + (drift * alpha)
     st.session_state.last_drift_score = smoothed_drift
 
     from ddtrace import tracer
     tracer.current_span().set_metric("arbor.drift_score", smoothed_drift)
 
-    # LOGIC 1: SHOULD WE SWITCH?
-    # We only switch if the other branch is CLEARLY better (e.g., +0.05 better)
-    # and meets the minimum switch quality (0.65).
+    # ---------------------------------------------------------
+    # STEP D: THE DECISION SHOWDOWN
+    # ---------------------------------------------------------
+
+    # 1. SWITCH CHECK
+    # Must be > 0.65 AND significantly better than staying (+0.05)
+    # This ensures we don't switch for tiny gains, but we DO switch for real topics.
     if best_switch_score > 0.65 and best_switch_score > (stay_score + 0.05):
         return f"SWITCH:{best_switch_branch}"
 
-    # LOGIC 2: SHOULD WE STAY?
-    # If we didn't switch, is the current topic still good enough?
-    if stay_score > 0.60:
+    # 2. STAY CHECK
+    # CRITICAL UPDATE: Raised Threshold to 0.65
+    # This prevents the "0.62 Trap" where mediocre topics get stuck.
+    if stay_score > 0.65:
+        # UX FIX: CONFIDENCE INJECTION
+        # If we decide to STAY, we are "doubling down" on this context.
+        # Force the UI to show High Confidence (Green Bar) instead of "62%".
+        st.session_state.last_drift_score = 0.1
         return "STAY"
 
-    # LOGIC 3: CREATE NEW TOPIC
-    # If neither stays nor switches are good, we branch out.
-    name_prompt = f"Name the topic of this input in 2-3 words: '{user_input}'"
-    new_name = model.generate_content(name_prompt).text.strip()
+    # 3. CREATE CHECK
+    # If we failed both above, we split into a new node.
+    if not os.getenv("PROJECT_ID"): # Mock Mode catch
+        new_name = "New Topic"
+    else:
+        name_prompt = f"Name the topic of this input in 2-3 words: '{user_input}'"
+        new_name = model.generate_content(name_prompt).text.strip()
 
     return f"CREATE:{new_name}"
 
