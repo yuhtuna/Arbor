@@ -506,22 +506,28 @@ if prompt := st.chat_input("What's on your mind?"):
     elif "CREATE:" in decision:
         new_name = decision.split(":")[1]
 
-        # Calculate Relevance from Drift (Relevance = (1-Drift)*10)
-        drift = st.session_state.get("last_drift_score", 0.0)
-        relevance = (1.0 - drift) * 10.0
+        # ---------------------------------------------------------
+        # PARENTING LOGIC FIX: Decouple from UI Smoothing
+        # ---------------------------------------------------------
+        # We cannot use 'last_drift_score' because it lags behind reality.
+        # We must calculate the FRESH, INSTANT similarity to the current node.
 
-        # DEFAULT DECISION: Based on Thresholds
+        # 1. Re-calculate Raw Vector Match
+        input_vec = get_batch_embeddings([prompt], task_type="RETRIEVAL_QUERY")[0]
+        parent_vec = st.session_state.nodes[st.session_state.current_branch].get("vector")
+        raw_sim = cosine_similarity(input_vec, parent_vec)
+
+        # DEFAULT DECISION
         is_child = False
 
-        # Case 1: Clear Match (High Trust)
-        if relevance > 6.0:
+        # Case 1: Clear Match (> 60% similarity)
+        # If it's 60% related, it's definitely a sub-topic (Child).
+        if raw_sim > 0.60:
             is_child = True
 
-        # Case 2: The "Gray Zone" (Ambiguous)
-        # Score is between 5.0 and 6.0 (e.g., your 59% Resume/Intern case)
-        elif relevance > 5.0:
-            # TIE-BREAKER: Ask the "Brain" (LLM) for a second opinion
-            # This is slower but much smarter than a raw vector check.
+        # Case 2: The "Gray Zone" (50% - 60%)
+        # It's ambiguous. Ask the LLM for a second opinion.
+        elif raw_sim > 0.50:
             check_prompt = f"""
             Task: Parenting Check.
             Is the new topic '{new_name}' a direct sub-step or detail of '{st.session_state.current_branch}'?
@@ -529,7 +535,6 @@ if prompt := st.chat_input("What's on your mind?"):
             Answer YES or NO only.
             """
             try:
-                # Quick call to Gemini
                 check_resp = model.generate_content(check_prompt).text.strip().upper()
                 if "YES" in check_resp:
                     is_child = True
@@ -537,12 +542,14 @@ if prompt := st.chat_input("What's on your mind?"):
             except:
                 is_child = False
 
-        # EXECUTE DECISION
+        # ---------------------------------------------------------
+        # EXECUTION (Create the Node)
+        # ---------------------------------------------------------
         if is_child:
             parent_node = st.session_state.current_branch
             st.success(f"Drilling down: {st.session_state.current_branch} → {new_name}")
         else:
-            # Sibling Logic
+            # Sibling Logic: Attach to Start (or Root)
             if st.session_state.current_branch in ["ROOT", "Start"]:
                  parent_node = st.session_state.current_branch
             else:
@@ -550,11 +557,8 @@ if prompt := st.chat_input("What's on your mind?"):
 
             st.toast(f"New Branch Created: {new_name}", icon="🌿")
 
-        # INDEXING STEP: Generate vector for the new name immediately
-        # PATH-AWARENESS LOGIC:
-        # Instead of embedding just "Sauce", we embed "Cooking > Pasta > Sauce".
-        # This ensures the child vector inherits the semantic context of the parent.
-
+        # INDEXING STEP
+        # Path-Awareness: Inherit parent name for better vector search later
         if parent_node and parent_node not in ["ROOT", "Start"]:
             contextual_text = f"{parent_node} {new_name}"
         else:
@@ -565,7 +569,7 @@ if prompt := st.chat_input("What's on your mind?"):
         st.session_state.nodes[new_name] = {
             "history": [],
             "parent": parent_node,
-            "vector": new_vec  # <--- Store it for future lookups
+            "vector": new_vec
         }
         target_branch = new_name
 
