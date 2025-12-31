@@ -424,9 +424,14 @@ with st.sidebar:
         st.metric("Est. Cost", f"${st.session_state.total_cost:.4f}")
 
     # The 'Mic Drop' Metric
+    saved = st.session_state.get('tokens_saved', 0)
+    used = st.session_state.total_tokens
+    total_potential = used + saved
+    efficiency = (saved / total_potential * 100) if total_potential > 0 else 0
+
     st.metric("🚫 Tokens Saved (Arbor Optimization)",
-              f"{st.session_state.get('tokens_saved', 0)}",
-              delta="Efficiency +40%")
+              f"{saved}",
+              delta=f"Efficiency +{efficiency:.1f}%")
 
 # Chat Interface
 st.title("Arbor")
