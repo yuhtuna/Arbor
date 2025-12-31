@@ -8,11 +8,11 @@ from dotenv import load_dotenv
 # 1. SETUP & CONFIG
 load_dotenv()
 
-# Detect Mode
-PROJECT_ID = os.getenv("PROJECT_ID")
-DD_API_KEY = os.getenv("DD_API_KEY")
-DD_SITE = os.getenv("DD_SITE")
-MODEL = os.getenv("MODEL")
+# Detect Mode (Env Var -> Secrets Fallback)
+PROJECT_ID = os.getenv("PROJECT_ID") or st.secrets.get("PROJECT_ID")
+DD_API_KEY = os.getenv("DD_API_KEY") or st.secrets.get("DD_API_KEY")
+DD_SITE = os.getenv("DD_SITE") or st.secrets.get("DD_SITE")
+MODEL = os.getenv("MODEL") or st.secrets.get("MODEL")
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
@@ -41,11 +41,44 @@ if DD_API_KEY:
     )
 
 # Initialize Google Vertex AI
-vertexai.init(project=PROJECT_ID, location="us-central1")
+# AUTHENTICATION FIX: Support Streamlit Secrets (Service Account)
+from google.oauth2 import service_account
+
+credentials = None
+if "gcp_service_account" in st.secrets:
+    print("DEBUG: Found [gcp_service_account] in secrets")
+    # Create credentials from the secrets dictionary
+    credentials = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+elif "type" in st.secrets and st.secrets["type"] == "service_account":
+    print("DEBUG: Found flattened service account in secrets")
+    # Handle case where secrets are flattened (no [gcp_service_account] section)
+    credentials = service_account.Credentials.from_service_account_info(
+        st.secrets,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+else:
+    print("DEBUG: No service account found in secrets")
+
+if credentials:
+    print("DEBUG: Initializing vertexai with credentials")
+    vertexai.init(project=PROJECT_ID, location="us-central1", credentials=credentials)
+    # Also initialize aiplatform explicitly to ensure Model Garden uses the credentials
+    from google.cloud import aiplatform
+    aiplatform.init(project=PROJECT_ID, location="us-central1", credentials=credentials)
+else:
+    # Fallback to default (CLI/Environment) auth
+    print("DEBUG: Initializing vertexai without credentials (ADC)")
+    vertexai.init(project=PROJECT_ID, location="us-central1")
+
 model = GenerativeModel(MODEL)
 
 # Load the lightweight embedding model
+print("DEBUG: Loading embedding model...")
 embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
+print("DEBUG: Embedding model loaded successfully")
 
 def count_local_tokens(text):
     """
@@ -650,8 +683,9 @@ if prompt := st.chat_input("What's on your mind?"):
 
         # C. Decision Logic
         # Thresholds
-        STRONG_MATCH = 0.68  # Lowered to catch more obvious connections
-        WEAK_MATCH = 0.55    # Lowered to allow LLM to judge more cases
+        STRONG_MATCH = 0.72  # High bar for automatic acceptance
+        WEAK_MATCH = 0.58    # Lower bar requires LLM verification
+        BETTER_MATCH_MARGIN = 0.10
         
         parent_node = "Start" # Default
         
@@ -660,45 +694,31 @@ if prompt := st.chat_input("What's on your mind?"):
             parent_node = best_ancestor
             st.toast(f"Kept Context: {parent_node}", icon="🔗")
             
-        # 2. Switch to Global if it's strong and better than ancestor
-        elif best_global and best_global_score > STRONG_MATCH and best_global_score > best_anc_score:
+        # 2. Switch to Global if it's significantly better
+        elif best_global and best_global_score > STRONG_MATCH and best_global_score > (best_anc_score + BETTER_MATCH_MARGIN):
             parent_node = best_global
             st.toast(f"Re-routed to: {parent_node}", icon="twisted_rightwards_arrows")
             
-        # 3. Gray Zone: Check the BETTER of the two (Global vs Ancestor)
-        else:
-            # Pick the candidate with the higher score
-            if best_global and best_global_score > best_anc_score:
-                candidate = best_global
-                score = best_global_score
-                is_global = True
-            else:
-                candidate = best_ancestor
-                score = best_anc_score
-                is_global = False
-            
-            # If candidate is decent (> WEAK_MATCH), ask LLM
-            if candidate and score > WEAK_MATCH:
-                 try:
-                     check_prompt = f"""
-                     Is the new topic '{new_name}' a sub-topic or directly related to '{candidate}'?
-                     Answer YES or NO.
-                     """
-                     check_resp = model.generate_content(check_prompt).text.strip().upper()
-                     
-                     if "YES" in check_resp:
-                         parent_node = candidate
-                         if is_global:
-                             st.toast(f"Global Context Found: {parent_node}", icon="🌍")
-                         else:
-                             st.toast(f"Verified Context: {parent_node}", icon="✅")
-                     else:
-                         st.toast(f"Context Rejected: {candidate}", icon="🚫")
-                 except:
-                     pass
+        # 3. Gray Zone (0.58 - 0.72): Ask LLM for a "Vibe Check"
+        elif best_ancestor and best_anc_score > WEAK_MATCH:
+             try:
+                 check_prompt = f"""
+                 Is the new topic '{new_name}' a sub-topic or directly related to '{best_ancestor}'?
+                 Answer YES or NO.
+                 """
+                 check_resp = model.generate_content(check_prompt).text.strip().upper()
+                 
+                 if "YES" in check_resp:
+                     parent_node = best_ancestor
+                     st.toast(f"Verified Context: {parent_node}", icon="✅")
+                 else:
+                     st.toast(f"Context Rejected: {best_ancestor}", icon="🚫")
+             except:
+                 # On error, be conservative and split
+                 pass
              
-        # 4. Fallback: New Topic (Start)
-        if parent_node == "Start":
+        # 4. Else: New Topic (Start)
+        else:
              st.toast(f"New Topic Created: {new_name}", icon="🌿")
 
         # INDEXING STEP
