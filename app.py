@@ -38,6 +38,13 @@ model = GenerativeModel(MODEL)
 # Load the lightweight embedding model
 embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
 
+def count_local_tokens(text):
+    """
+    Fast, free local estimation (1 token ~= 4 chars).
+    """
+    if not text: return 0
+    return len(text) // 4
+
 def get_batch_embeddings(texts, task_type="RETRIEVAL_DOCUMENT"):
     """
     Generates vectors for a LIST of texts in ONE API call.
@@ -78,8 +85,7 @@ def llm_task(name):
 
 def log_execution_metrics(response):
     """
-    Extracts tokens and calculates cost for Datadog.
-    Also updates Session State for UI display.
+    Extracts actual usage and calculates 'Shadow Savings' (what we avoided sending).
     """
     try:
         usage = response.usage_metadata
@@ -87,32 +93,43 @@ def log_execution_metrics(response):
         output_tokens = usage.candidates_token_count
         total_tokens = input_tokens + output_tokens
 
-        # Calculate Cost (Approximate)
-        # 1 token approx 4 characters
-        # Input: $0.00001875 per 1k chars
-        # Output: $0.000075 per 1k chars
-        input_cost = (input_tokens * 4 / 1000) * 0.00001875
-        output_cost = (output_tokens * 4 / 1000) * 0.000075
+        # Cost Calculation (Gemini Flash Pricing)
+        input_cost = (input_tokens / 1000) * 0.00001875
+        output_cost = (output_tokens / 1000) * 0.000075
         total_cost = input_cost + output_cost
 
-        # Update Session State for UI
-        if "total_tokens" in st.session_state:
-            st.session_state.total_tokens += total_tokens
-        if "total_cost" in st.session_state:
-            st.session_state.total_cost += total_cost
+        # Update Totals
+        if "total_tokens" in st.session_state: st.session_state.total_tokens += total_tokens
+        if "total_cost" in st.session_state: st.session_state.total_cost += total_cost
 
-        # Estimate Saved Tokens (Hackathon logic: Arbor saves ~40%)
-        saved_estimate = int(total_tokens * 0.4)
+        # --- REAL-TIME SAVINGS CALCULATION ---
+        # 1. Identify the Active Path (Nodes we JUST sent)
+        active_path = set()
+        curr = st.session_state.current_branch
+        while curr:
+            active_path.add(curr)
+            curr = st.session_state.nodes[curr].get("parent")
+
+        # 2. Sum tokens of INACTIVE branches (The "Pruned" Context)
+        inactive_tokens = 0
+        for name, node in st.session_state.nodes.items():
+            if name not in active_path and name != "ROOT":
+                # Count tokens in this inactive branch's history
+                history_text = " ".join([m["content"] for m in node.get("history", [])])
+                inactive_tokens += count_local_tokens(history_text)
+
+        # 3. Update the Metric
         if "tokens_saved" not in st.session_state: st.session_state.tokens_saved = 0
-        st.session_state.tokens_saved += saved_estimate
+        st.session_state.tokens_saved += inactive_tokens
 
-        # Datadog Metrics
+        # Datadog
         from ddtrace import tracer
         span = tracer.current_span()
         if span:
+            span.set_metric("arbor.tokens.total", total_tokens)
+            span.set_metric("arbor.tokens.saved_real", inactive_tokens) # Real metric!
             span.set_metric("arbor.tokens.input", input_tokens)
             span.set_metric("arbor.tokens.output", output_tokens)
-            span.set_metric("arbor.tokens.total", total_tokens)
             span.set_metric("arbor.cost.usd", total_cost)
 
     except Exception as e:
