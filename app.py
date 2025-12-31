@@ -204,11 +204,11 @@ def extract_global_facts(user_input):
 @llm_task(name="router_decision")
 def route_topic(user_input, current_branch, all_branches):
     """
-    ARBOR 4.1: Indexed Routing + Confidence Injection
+    ARBOR 4.2: Tiered Confidence (The "Self-Aware" Router)
     """
     if check_jailbreak(user_input): return "STAY"
 
-    # 1. Embed User Input (The ONLY API Call we make now!)
+    # 1. Embed User Input
     input_vec = get_batch_embeddings([user_input], task_type="RETRIEVAL_QUERY")[0]
 
     # ---------------------------------------------------------
@@ -217,8 +217,8 @@ def route_topic(user_input, current_branch, all_branches):
     current_vec = st.session_state.nodes[current_branch].get("vector")
     raw_relevance = cosine_similarity(input_vec, current_vec)
 
-    # Apply Inertia (Home Court Advantage)
-    # Only boost if it's already decent (>0.45) to prevent sticky "junk"
+    # Inertia: Only boost if decent match (>0.45)
+    # This keeps "Tents" attached to "Camping"
     if current_branch not in ["ROOT", "Start"] and raw_relevance > 0.45:
         stay_score = min(1.0, raw_relevance + 0.10)
     else:
@@ -232,28 +232,21 @@ def route_topic(user_input, current_branch, all_branches):
 
     for branch in all_branches:
         if branch == "ROOT" or branch == current_branch: continue
-
         branch_vec = st.session_state.nodes[branch].get("vector")
         if branch_vec is None: continue
-
         score = cosine_similarity(input_vec, branch_vec)
         if score > best_switch_score:
             best_switch_score = score
             best_switch_branch = branch
 
     # ---------------------------------------------------------
-    # STEP C: METRICS & VISUALIZATION (Adaptive Momentum)
+    # STEP C: METRICS (Adaptive Momentum)
     # ---------------------------------------------------------
     drift = 1.0 - stay_score
-
-    # Smooth the UI Score
     prev_drift = st.session_state.get("last_drift_score", 0.0)
 
-    # MOMENTUM TUNING:
-    # If drift is increasing (User confused), drop fast (0.7).
-    # If drift is decreasing (Recovery), rise fast (0.5) -- WAS 0.2 (Too Slow)
+    # Fast drop (0.7) if confused, Fast recovery (0.5) if stabilizing
     alpha = 0.7 if drift > prev_drift else 0.5
-
     smoothed_drift = (prev_drift * (1 - alpha)) + (drift * alpha)
     st.session_state.last_drift_score = smoothed_drift
 
@@ -261,28 +254,38 @@ def route_topic(user_input, current_branch, all_branches):
     tracer.current_span().set_metric("arbor.drift_score", smoothed_drift)
 
     # ---------------------------------------------------------
-    # STEP D: THE DECISION SHOWDOWN
+    # STEP D: DECISION SHOWDOWN
     # ---------------------------------------------------------
 
     # 1. SWITCH CHECK
-    # Must be > 0.65 AND significantly better than staying (+0.05)
-    # This ensures we don't switch for tiny gains, but we DO switch for real topics.
+    # Only switch if significantly better (+0.05)
     if best_switch_score > 0.65 and best_switch_score > (stay_score + 0.05):
         return f"SWITCH:{best_switch_branch}"
 
-    # 2. STAY CHECK
-    # CRITICAL UPDATE: Raised Threshold to 0.65
-    # This prevents the "0.62 Trap" where mediocre topics get stuck.
+    # 2. STAY CHECK (With Tiered Confidence)
     if stay_score > 0.65:
-        # UX FIX: CONFIDENCE INJECTION
-        # If we decide to STAY, we are "doubling down" on this context.
-        # Force the UI to show High Confidence (Green Bar) instead of "62%".
-        st.session_state.last_drift_score = 0.1
+        # UX FIX: Honest Feedback
+        # Instead of lying and saying "95%" for everything, we map reality.
+
+        if stay_score > 0.80:
+            # PERFECT MATCH: User is exactly on topic.
+            st.session_state.last_drift_score = 0.05  # 95% (Green Lock 🔒)
+
+        elif stay_score > 0.70:
+            # GOOD MATCH: Standard conversation flow.
+            st.session_state.last_drift_score = 0.15  # 85% (Green/Solid ✅)
+
+        else:
+            # WARNING ZONE (65% - 70%):
+            # The user is drifting (e.g., specific recipes in a general chat).
+            # We STAY, but we drop the bar to Yellow/Orange.
+            # This psychologically nudges them to fix it.
+            st.session_state.last_drift_score = 0.30  # 70% (Yellow/Warning ⚠️)
+
         return "STAY"
 
     # 3. CREATE CHECK
-    # If we failed both above, we split into a new node.
-    if not os.getenv("PROJECT_ID"): # Mock Mode catch
+    if not os.getenv("PROJECT_ID"):
         new_name = "New Topic"
     else:
         name_prompt = f"Name the topic of this input in 2-3 words: '{user_input}'"
