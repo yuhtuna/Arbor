@@ -211,75 +211,69 @@ def route_topic(user_input, current_branch, all_branches):
     # 1. Embed User Input (The ONLY API Call we make now!)
     input_vec = get_batch_embeddings([user_input], task_type="RETRIEVAL_QUERY")[0]
 
-    # 2. Retrieve Cached Vectors (Zero Cost)
-    # Get current branch vector from memory
+    # ---------------------------------------------------------
+    # STEP A: CALCULATE "STAY" SCORE (Current Branch)
+    # ---------------------------------------------------------
     current_vec = st.session_state.nodes[current_branch].get("vector")
-
-    # 3. Calculate Drift (Math only)
     raw_relevance = cosine_similarity(input_vec, current_vec)
 
-    # ---------------------------------------------------------
-    # CONDITIONAL INERTIA (The Fix)
-    # Only give a boost if the topic is ALREADY somewhat related (> 0.45).
-    # This helps "Tent" (0.55 -> 0.65) stick,
-    # but stops "Python" (0.20) from getting a free pass.
-    # ---------------------------------------------------------
+    # Apply Inertia (Home Court Advantage)
+    # Only boost if it's already decent (>0.45) to prevent sticky "junk"
     if current_branch not in ["ROOT", "Start"] and raw_relevance > 0.45:
-        relevance = min(1.0, raw_relevance + 0.10) # Lower boost to +0.10
+        stay_score = min(1.0, raw_relevance + 0.10)
     else:
-        relevance = raw_relevance
+        stay_score = raw_relevance
 
-    # PENALTY BOX (The Fix):
-    # If relevance drops below 0.5, it's likely a complete context switch.
-    # Punish it heavily to alert the user.
-    if relevance < 0.5:
-        relevance = 0.0
+    # ---------------------------------------------------------
+    # STEP B: CALCULATE "SWITCH" SCORE (Best Sibling)
+    # ---------------------------------------------------------
+    best_switch_branch = None
+    best_switch_score = -1.0
 
-    instant_drift = 1.0 - relevance
+    for branch in all_branches:
+        if branch == "ROOT" or branch == current_branch: continue
 
-    # ADAPTIVE MOMENTUM (Exponential Moving Average)
-    # Trust is hard to gain (0.2) but easy to lose (0.7).
+        branch_vec = st.session_state.nodes[branch].get("vector")
+        if branch_vec is None: continue
+
+        score = cosine_similarity(input_vec, branch_vec)
+        if score > best_switch_score:
+            best_switch_score = score
+            best_switch_branch = branch
+
+    # ---------------------------------------------------------
+    # STEP C: THE SHOWDOWN (Compare & Decide)
+    # ---------------------------------------------------------
+
+    # METRICS & LOGGING (Adaptive Momentum)
+    instant_drift = 1.0 - stay_score
     prev_drift = st.session_state.get("last_drift_score", 0.0)
 
+    # Trust is hard to gain (0.2) but easy to lose (0.7).
     if instant_drift > prev_drift:
         alpha = 0.7 # Fast drop
     else:
         alpha = 0.2 # Slow recovery
 
     smoothed_drift = (prev_drift * (1 - alpha)) + (instant_drift * alpha)
-
     st.session_state.last_drift_score = smoothed_drift
 
-    # Log to Datadog
     from ddtrace import tracer
     tracer.current_span().set_metric("arbor.drift_score", smoothed_drift)
 
-    # 4. DECISION LOGIC (Stricter Thresholds)
+    # LOGIC 1: SHOULD WE SWITCH?
+    # We only switch if the other branch is CLEARLY better (e.g., +0.05 better)
+    # and meets the minimum switch quality (0.65).
+    if best_switch_score > 0.65 and best_switch_score > (stay_score + 0.05):
+        return f"SWITCH:{best_switch_branch}"
 
-    # STRICTER STAY THRESHOLD: Raised to 0.60
-    if relevance > 0.60:
+    # LOGIC 2: SHOULD WE STAY?
+    # If we didn't switch, is the current topic still good enough?
+    if stay_score > 0.60:
         return "STAY"
 
-    # Search for Switches
-    best_match = None
-    best_score = -1.0
-
-    for branch in all_branches:
-        if branch == "ROOT" or branch == current_branch: continue
-        branch_vec = st.session_state.nodes[branch].get("vector")
-        if branch_vec is None: continue
-
-        score = cosine_similarity(input_vec, branch_vec)
-        if score > best_score:
-            best_score = score
-            best_match = branch
-
-    # STRICTER SWITCH THRESHOLD: Raised to 0.65
-    if best_score > 0.65:
-        return f"SWITCH:{best_match}"
-
-    # If we are here, it's definitely a NEW topic.
-    # Generate a name.
+    # LOGIC 3: CREATE NEW TOPIC
+    # If neither stays nor switches are good, we branch out.
     name_prompt = f"Name the topic of this input in 2-3 words: '{user_input}'"
     new_name = model.generate_content(name_prompt).text.strip()
 
