@@ -21,6 +21,15 @@ import numpy as np
 from ddtrace import tracer, patch_all
 from ddtrace.llmobs import LLMObs
 
+# Optional interactive graph
+try:
+    from streamlit_agraph import agraph, Node, Edge, Config
+except ImportError:
+    agraph = None
+    Node = None
+    Edge = None
+    Config = None
+
 patch_all()
 
 # Initialize Datadog
@@ -160,9 +169,13 @@ def get_active_lineage(branch_name):
     """
     history = []
     current = branch_name
+    visited = set() # Cycle detection
 
     # Traverse up the tree
     while current and current in st.session_state.nodes:
+        if current in visited: break # Stop if cycle detected
+        visited.add(current)
+
         node_data = st.session_state.nodes[current]
         # Prepend current node's history (so ROOT is first)
         history = node_data.get("history", []) + history
@@ -218,9 +231,9 @@ def route_topic(user_input, current_branch, all_branches):
     raw_relevance = cosine_similarity(input_vec, current_vec)
 
     # Inertia: Only boost if decent match (>0.45)
-    # This keeps "Tents" attached to "Camping"
+    # REDUCED BOOST: 0.10 -> 0.02 to allow "Drilling Down" (Child Nodes) more easily.
     if current_branch not in ["ROOT", "Start"] and raw_relevance > 0.45:
-        stay_score = min(1.0, raw_relevance + 0.10)
+        stay_score = min(1.0, raw_relevance + 0.02)
     else:
         stay_score = raw_relevance
 
@@ -259,11 +272,12 @@ def route_topic(user_input, current_branch, all_branches):
 
     # 1. SWITCH CHECK
     # Only switch if significantly better (+0.05)
-    if best_switch_score > 0.65 and best_switch_score > (stay_score + 0.05):
+    # LOWERED THRESHOLD: 0.65 -> 0.60 to catch more "return to topic" cases
+    if best_switch_score > 0.60 and best_switch_score > (stay_score + 0.05):
         return f"SWITCH:{best_switch_branch}"
 
     # 2. STAY CHECK (With Tiered Confidence)
-    if stay_score > 0.65:
+    if stay_score >= 0.70:
         # UX FIX: Honest Feedback
         # Instead of lying and saying "95%" for everything, we map reality.
 
@@ -271,16 +285,9 @@ def route_topic(user_input, current_branch, all_branches):
             # PERFECT MATCH: User is exactly on topic.
             st.session_state.last_drift_score = 0.05  # 95% (Green Lock 🔒)
 
-        elif stay_score > 0.70:
+        else:
             # GOOD MATCH: Standard conversation flow.
             st.session_state.last_drift_score = 0.15  # 85% (Green/Solid ✅)
-
-        else:
-            # WARNING ZONE (65% - 70%):
-            # The user is drifting (e.g., specific recipes in a general chat).
-            # We STAY, but we drop the bar to Yellow/Orange.
-            # This psychologically nudges them to fix it.
-            st.session_state.last_drift_score = 0.30  # 70% (Yellow/Warning ⚠️)
 
         return "STAY"
 
@@ -288,8 +295,27 @@ def route_topic(user_input, current_branch, all_branches):
     if not os.getenv("PROJECT_ID"):
         new_name = "New Topic"
     else:
-        name_prompt = f"Name the topic of this input in 2-3 words: '{user_input}'"
-        new_name = model.generate_content(name_prompt).text.strip()
+        try:
+            # Dynamic Naming Strategy based on similarity to current context
+            if raw_relevance > 0.40:
+                 # Likely a child/related node -> Be Specific
+                 name_prompt = f"Name this specific sub-topic in 2-3 words (e.g. 'Making Sandwiches'). Return ONLY the name. No markdown. No punctuation. Input: '{user_input}'"
+            else:
+                 # Likely a new root topic -> Be Generic
+                 name_prompt = f"Classify this input into a BROAD, GENERIC category (1-2 words, e.g. 'Cooking'). Return ONLY the name. No markdown. No punctuation. Input: '{user_input}'"
+
+            raw_name = model.generate_content(name_prompt).text.strip()
+            
+            # CLEANUP: Remove markdown, quotes, and extra text
+            new_name = raw_name.replace("**", "").replace('"', "").replace("'", "").split("\n")[0]
+            
+            # SAFETY: If model is chatty and returns a sentence, truncate or fallback
+            if len(new_name) > 25:
+                new_name = new_name[:25] + "..."
+                
+        except Exception as e:
+            print(f"Naming Error: {e}")
+            new_name = "New Topic"
 
     return f"CREATE:{new_name}"
 
@@ -327,7 +353,8 @@ st.set_page_config(layout="wide", page_title="Arbor")
 if "nodes" not in st.session_state:
     # Generate initial index for default nodes
     root_vec = get_batch_embeddings(["ROOT"], task_type="RETRIEVAL_DOCUMENT")[0]
-    start_vec = get_batch_embeddings(["Start"], task_type="RETRIEVAL_DOCUMENT")[0]
+    # Improve Start vector to catch greetings and prevent "Conversation" nodes
+    start_vec = get_batch_embeddings(["Start conversation greetings hello hi what's up"], task_type="RETRIEVAL_DOCUMENT")[0]
 
     st.session_state.nodes = {
         "ROOT": {
@@ -353,107 +380,159 @@ if "last_drift_score" not in st.session_state:
     st.session_state.last_drift_score = 0.1 # Default safe
 if "tokens_saved" not in st.session_state:
     st.session_state.tokens_saved = 0
+if "show_graph_fullscreen" not in st.session_state:
+    st.session_state.show_graph_fullscreen = False
 
 # Determine Active Path for Visualization
 active_path = set()
 curr = st.session_state.current_branch
-while curr:
+visited_path = set() # Cycle detection
+
+while curr and curr in st.session_state.nodes:
+    if curr in visited_path: break # Stop if cycle detected
+    visited_path.add(curr)
+    
     active_path.add(curr)
     curr = st.session_state.nodes[curr].get("parent")
 
-# Sidebar: Visual Tree
+
+# Helper: render interactive graph (agraph when available, graphviz fallback)
+def render_graph(fullscreen=False, show_caption=True):
+    if agraph and Config:
+        nodes = []
+        edges = []
+        for name, node in st.session_state.nodes.items():
+            # Purple/gray theme; labels drawn inside nodes
+            color = "#8b5cf6" if name in active_path else "#4b5563"
+            font_color = "#ffffff"
+            nodes.append(Node(
+                id=name,
+                label=name,
+                size=28 if fullscreen else 22,
+                color=color,
+                font={"color": font_color, "size": 12, "multi": True}
+            ))
+            parent = node.get("parent")
+            if parent:
+                edge_color = "#a78bfa" if (name in active_path and parent in active_path) else "#6b7280"
+                edges.append(Edge(source=parent, target=name, color=edge_color, width=2))
+
+        config = Config(
+            width=1400 if fullscreen else 320,
+            height=850 if fullscreen else 260,
+            directed=True,
+            physics=True,
+            hierarchical=False,
+            nodeHighlightBehavior=True,
+            highlightColor="#c4b5fd",
+            collapsible=False,
+            node={'labelProperty': 'label', 'renderLabel': True},
+            link={'labelProperty': 'label', 'renderLabel': False},
+            d3={'linkLength': 200 if fullscreen else 120, 'charge': -600 if fullscreen else -450},
+            staticGraph=False,
+            staticGraphWithDragAndDrop=False
+        )
+
+        # Dark grid background
+        st.markdown("""
+        <style>
+        .stApp iframe {
+            background:
+                linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px),
+                #0a0a0f !important;
+            background-size: 20px 20px !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        if show_caption:
+            st.caption("Interactive Graph")
+        agraph(nodes=nodes, edges=edges, config=config)
+    else:
+        graph = graphviz.Digraph()
+        graph.attr(rankdir='TB', size='2,2', margin='0.1', fontsize='10')
+        graph.attr('node', fontsize='10', height='0.3', width='0.5', margin='0.05')
+        root_attrs = {"color": "green", "fillcolor": "#e6ffe6", "penwidth": "2"} if "ROOT" in active_path else {"color": "grey", "fillcolor": "#f0f0ff", "penwidth": "1"}
+        graph.node("ROOT", label="ROOT", shape="box", style="filled", **root_attrs)
+        for name in st.session_state.nodes:
+            if name == "ROOT": continue
+            if name in active_path:
+                color, fill, penwidth = "green", "#e6ffe6", "2"
+            else:
+                color, fill, penwidth = "grey", "white", "1"
+            graph.node(name, label=name, color=color, style="filled", fillcolor=fill, penwidth=penwidth)
+            parent = st.session_state.nodes[name].get("parent")
+            if parent:
+                edge_color = "green" if (name in active_path and parent in active_path) else "grey"
+                graph.edge(parent, name, color=edge_color)
+        st.graphviz_chart(graph, use_container_width=True)
+
+# Sidebar
 with st.sidebar:
-    st.header("🧠 Memory Topology")
+    # 1) Context Switch
+    all_branches = [n for n in st.session_state.nodes.keys() if n != "ROOT"]
+    if st.session_state.current_branch == "ROOT":
+        st.session_state.current_branch = "Start"
+        st.rerun()
 
-    st.header("🕰️ Context Time Travel")
-
-    # Get all available branches
-    all_branches = list(st.session_state.nodes.keys())
-
-    # Create a Selectbox to manually jump branches
-    # Default to current_branch
     selected_branch = st.selectbox(
-        "Jump to Topic:",
+        "Context Switch",
         all_branches,
         index=all_branches.index(st.session_state.current_branch)
     )
-
-    # Logic: If user changes the dropdown, FORCE a switch
     if selected_branch != st.session_state.current_branch:
         st.session_state.current_branch = selected_branch
-        st.toast(f"⏳ Time Travelled to: {selected_branch}", icon="🚀")
+        st.toast(f"Switched to: {selected_branch}")
         st.rerun()
 
-    graph = graphviz.Digraph()
-    graph.attr(rankdir='TB')
+    # 2) Interactive Graph (sidebar) with hover zoom icon
+    zoom_col1, zoom_col2 = st.columns([0.8, 0.2])
+    with zoom_col2:
+        if st.button("🔍", help="Fullscreen graph"):
+            st.session_state.show_graph_fullscreen = True
+            st.rerun()
 
-    # Root Node
-    root_facts = "<br/>".join(st.session_state.nodes["ROOT"]["facts"])
+    render_graph(fullscreen=False, show_caption=True)
 
-    if "ROOT" in active_path:
-        root_attrs = {"color": "green", "fillcolor": "#e6ffe6", "penwidth": "2"}
-    else:
-        root_attrs = {"color": "grey", "fillcolor": "#f0f0ff", "penwidth": "1"}
-
-    graph.node("ROOT", label=f"ROOT\n{root_facts}", shape="doubleoctagon", style="filled", **root_attrs)
-
-    # Dynamic Branches
-    for name in st.session_state.nodes:
-        if name == "ROOT": continue
-
-        # Determine styling based on active path
-        if name in active_path:
-            color = "green"
-            fill = "#e6ffe6"
-            penwidth = "2"
-        else:
-            color = "grey"
-            fill = "white"
-            penwidth = "1"
-
-        graph.node(name, label=name, color=color, style="filled", fillcolor=fill, penwidth=penwidth)
-
-        # Edge Logic: Connect to parent
-        parent = st.session_state.nodes[name].get("parent")
-        if parent:
-            edge_color = "green" if (name in active_path and parent in active_path) else "grey"
-            edge_width = "2" if (name in active_path and parent in active_path) else "1"
-            graph.edge(parent, name, color=edge_color, penwidth=edge_width)
-
-    st.graphviz_chart(graph)
-
-    # --- FINOPS & HEALTH DASHBOARD ---
+    # 3) Context Stability Bar
     st.divider()
-    st.subheader("📊 System Health")
-
-    # Context Health Bar
     drift = st.session_state.get("last_drift_score", 0.0)
     health = max(0, min(100, int((1 - drift) * 100)))
     st.caption(f"Context Stability: {health}%")
-
-    # Dynamic Color for Bar
-    # Streamlit progress doesn't natively support color arg in all versions,
-    # but let's stick to standard progress.
     st.progress(health / 100)
 
-    st.subheader("💰 Efficiency Metrics")
+    # 4) Compact Metrics
+    total_used = st.session_state.total_tokens
+    total_saved = st.session_state.get('tokens_saved', 0)
+    
+    if (total_used + total_saved) > 0:
+        efficiency = (total_saved / (total_used + total_saved)) * 100
+    else:
+        efficiency = 0.0
+
     c1, c2 = st.columns(2)
-    with c1:
-        st.metric("Tokens Used", f"{st.session_state.total_tokens}")
-    with c2:
-        st.metric("Est. Cost", f"${st.session_state.total_cost:.4f}")
-
-    # The 'Mic Drop' Metric
-    saved = st.session_state.get('tokens_saved', 0)
-    used = st.session_state.total_tokens
-    total_potential = used + saved
-    efficiency = (saved / total_potential * 100) if total_potential > 0 else 0
-
-    st.metric("🚫 Tokens Saved (Arbor Optimization)",
-              f"{saved}",
-              delta=f"Efficiency +{efficiency:.1f}%")
+    c1.metric("Tokens Used", f"{total_used:,}")
+    c2.metric("Tokens Saved", f"{total_saved:,}")
+    
+    c3, c4 = st.columns(2)
+    c3.metric("Est. Cost", f"${st.session_state.total_cost:.4f}")
+    c4.metric("Efficiency", f"{efficiency:.1f}%")
 
 # Chat Interface
+if st.session_state.get("show_graph_fullscreen"):
+    # Fullscreen Graph View
+    close_col1, close_col2 = st.columns([0.9, 0.1])
+    with close_col1:
+        st.subheader("Knowledge Graph")
+    with close_col2:
+        if st.button("Close ✖", use_container_width=True):
+            st.session_state.show_graph_fullscreen = False
+            st.rerun()
+            
+    render_graph(fullscreen=True, show_caption=False)
+    st.stop() # Halt execution to hide chat interface
+
 st.title("Arbor")
 st.caption(f"Active Context: **{st.session_state.current_branch}**")
 
@@ -475,11 +554,12 @@ def handle_feedback():
             metric_name = "arbor.feedback.negative"
 
         from ddtrace import tracer
-        from ddtrace.llmobs import LLMObs
-        span = tracer.trace("arbor.user_feedback")
-        span.set_metric(metric_name, 1)
-        LLMObs.annotate(tags={"evaluation.quality": score})
-        span.finish()
+        
+        # FIX: Use standard tracer instead of LLMObs.annotate which requires an active LLM span
+        # This avoids the "No active LLMObs-generated span found" error while still tracking the data.
+        with tracer.trace("arbor.user_feedback") as span:
+            span.set_metric(metric_name, 1)
+            span.set_tag("evaluation.quality", score)
 
         st.toast("Thanks for your feedback!")
 
@@ -491,8 +571,13 @@ if prompt := st.chat_input("What's on your mind?"):
     # 1. Background: Learn Facts
     new_facts = extract_global_facts(prompt)
     if new_facts:
-        st.session_state.nodes["ROOT"]["facts"].extend(new_facts)
-        st.toast(f"Memorized: {new_facts}", icon="💾")
+        # DEDUPLICATION: Prevent storing the same fact twice
+        existing_facts = set(st.session_state.nodes["ROOT"]["facts"])
+        unique_new_facts = [f for f in new_facts if f not in existing_facts]
+
+        if unique_new_facts:
+            st.session_state.nodes["ROOT"]["facts"].extend(unique_new_facts)
+            st.toast(f"Memorized: {unique_new_facts}", icon="💾")
 
     # 2. Decision: Route & Self-Heal
     decision = route_topic(prompt, st.session_state.current_branch, list(st.session_state.nodes.keys()))
@@ -500,65 +585,69 @@ if prompt := st.chat_input("What's on your mind?"):
     target_branch = st.session_state.current_branch
 
     if "SWITCH:" in decision:
-        target_branch = decision.split(":")[1]
+        target_branch = decision.split(":", 1)[1]
         if target_branch == "ROOT":
              st.toast("⚠️ High Context Drift Detected! Resetting to Root...", icon="🚨")
         else:
              st.info(f"Switching to: {target_branch}")
+        
+        # FIX: Reset drift score because we found a good match
+        st.session_state.last_drift_score = 0.1
 
     elif "CREATE:" in decision:
-        new_name = decision.split(":")[1]
+        new_name = decision.split(":", 1)[1].strip()
+        
+        # FALLBACK: Ensure name is not empty
+        if not new_name:
+            new_name = "New Topic"
+
+        # PROTECTION: Prevent overwriting existing nodes
+        original_name = new_name
+        counter = 2
+        while new_name in st.session_state.nodes:
+            new_name = f"{original_name} ({counter})"
+            counter += 1
 
         # ---------------------------------------------------------
-        # PARENTING LOGIC FIX: Decouple from UI Smoothing
+        # PARENTING LOGIC: Ancestry Best-Match (The "Smart Climber")
         # ---------------------------------------------------------
-        # We cannot use 'last_drift_score' because it lags behind reality.
-        # We must calculate the FRESH, INSTANT similarity to the current node.
+        # Instead of stopping at the first match, we scan the ENTIRE ancestry chain
+        # and pick the node with the HIGHEST similarity score.
+        # This prevents "Dinner" from getting stuck under "Breakfast" just because they are somewhat related.
+        # It allows it to bubble up to "Cooking Plans" if that is a stronger match.
 
-        # 1. Re-calculate Raw Vector Match
         input_vec = get_batch_embeddings([prompt], task_type="RETRIEVAL_QUERY")[0]
-        parent_vec = st.session_state.nodes[st.session_state.current_branch].get("vector")
-        raw_sim = cosine_similarity(input_vec, parent_vec)
+        
+        # 1. Collect Ancestors
+        ancestors = []
+        curr = st.session_state.current_branch
+        while curr and curr in st.session_state.nodes and curr != "ROOT":
+            ancestors.append(curr)
+            curr = st.session_state.nodes[curr].get("parent")
+            
+        # 2. Find Best Match in Ancestry
+        best_ancestor = "Start"
+        best_score = -1.0
+        
+        for anc in ancestors:
+            anc_vec = st.session_state.nodes[anc].get("vector")
+            score = cosine_similarity(input_vec, anc_vec)
+            
+            # Debug toast (optional, can remove later)
+            # st.toast(f"Checking {anc}: {score:.2f}")
+            
+            if score > best_score:
+                best_score = score
+                best_ancestor = anc
 
-        # DEFAULT DECISION
-        is_child = False
-
-        # Case 1: Clear Match (> 60% similarity)
-        # If it's 60% related, it's definitely a sub-topic (Child).
-        if raw_sim > 0.60:
-            is_child = True
-
-        # Case 2: The "Gray Zone" (50% - 60%)
-        # It's ambiguous. Ask the LLM for a second opinion.
-        elif raw_sim > 0.50:
-            check_prompt = f"""
-            Task: Parenting Check.
-            Is the new topic '{new_name}' a direct sub-step or detail of '{st.session_state.current_branch}'?
-            Context: The user is switching from '{st.session_state.current_branch}' to '{new_name}'.
-            Answer YES or NO only.
-            """
-            try:
-                check_resp = model.generate_content(check_prompt).text.strip().upper()
-                if "YES" in check_resp:
-                    is_child = True
-                    st.toast("🧠 AI Tie-Breaker: Connected related topics!", icon="🔗")
-            except:
-                is_child = False
-
-        # ---------------------------------------------------------
-        # EXECUTION (Create the Node)
-        # ---------------------------------------------------------
-        if is_child:
-            parent_node = st.session_state.current_branch
-            st.success(f"Drilling down: {st.session_state.current_branch} → {new_name}")
+        # 3. Apply Decision
+        # We need a decent threshold to accept a parent (e.g. 0.50)
+        if best_score > 0.50:
+            parent_node = best_ancestor
+            st.toast(f"Filed under: {parent_node} (Score: {best_score:.2f})", icon="📂")
         else:
-            # Sibling Logic: Attach to Start (or Root)
-            if st.session_state.current_branch in ["ROOT", "Start"]:
-                 parent_node = st.session_state.current_branch
-            else:
-                 parent_node = "Start"
-
-            st.toast(f"New Branch Created: {new_name}", icon="🌿")
+            parent_node = "Start"
+            st.toast(f"New Top-Level Topic: {new_name}", icon="🌿")
 
         # INDEXING STEP
         # Path-Awareness: Inherit parent name for better vector search later
@@ -575,6 +664,9 @@ if prompt := st.chat_input("What's on your mind?"):
             "vector": new_vec
         }
         target_branch = new_name
+
+        # Reset relevance (drift score) for the new node
+        st.session_state.last_drift_score = 0.1
 
     st.session_state.current_branch = target_branch
 

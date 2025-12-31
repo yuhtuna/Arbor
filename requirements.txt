@@ -4,3 +4,4 @@ ddtrace
 graphviz
 python-dotenv
 numpy
+streamlit-agraph
