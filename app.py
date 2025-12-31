@@ -609,45 +609,97 @@ if prompt := st.chat_input("What's on your mind?"):
             counter += 1
 
         # ---------------------------------------------------------
-        # PARENTING LOGIC: Ancestry Best-Match (The "Smart Climber")
+        # PARENTING LOGIC: Hybrid Search (Ancestry + Global)
         # ---------------------------------------------------------
-        # Instead of stopping at the first match, we scan the ENTIRE ancestry chain
-        # and pick the node with the HIGHEST similarity score.
-        # This prevents "Dinner" from getting stuck under "Breakfast" just because they are somewhat related.
-        # It allows it to bubble up to "Cooking Plans" if that is a stronger match.
+        # 1. Local Context (Ancestry): Prefer keeping context if relevant.
+        # 2. Global Context: If unrelated to current chain, look elsewhere.
+        # 3. Fallback: If nothing matches, it's a new root topic.
 
         input_vec = get_batch_embeddings([prompt], task_type="RETRIEVAL_QUERY")[0]
         
-        # 1. Collect Ancestors
-        ancestors = []
-        curr = st.session_state.current_branch
-        while curr and curr in st.session_state.nodes and curr != "ROOT":
-            ancestors.append(curr)
-            curr = st.session_state.nodes[curr].get("parent")
-            
-        # 2. Find Best Match in Ancestry
-        best_ancestor = "Start"
-        best_score = -1.0
+        # A. Find Best Ancestor
+        best_ancestor = None
+        best_anc_score = -1.0
         
-        for anc in ancestors:
-            anc_vec = st.session_state.nodes[anc].get("vector")
-            score = cosine_similarity(input_vec, anc_vec)
+        curr = st.session_state.current_branch
+        while curr and curr in st.session_state.nodes:
+            if curr == "ROOT": break # Skip ROOT
             
-            # Debug toast (optional, can remove later)
-            # st.toast(f"Checking {anc}: {score:.2f}")
+            vec = st.session_state.nodes[curr].get("vector")
+            score = cosine_similarity(input_vec, vec)
             
-            if score > best_score:
-                best_score = score
-                best_ancestor = anc
+            if score > best_anc_score:
+                best_anc_score = score
+                best_ancestor = curr
+            
+            curr = st.session_state.nodes[curr].get("parent")
 
-        # 3. Apply Decision
-        # We need a decent threshold to accept a parent (e.g. 0.50)
-        if best_score > 0.50:
+        # B. Find Best Global (if Ancestor is weak)
+        best_global = None
+        best_global_score = -1.0
+        
+        # Only scan global if local is not a "slam dunk" (>0.75)
+        if best_anc_score < 0.75:
+            for name, node in st.session_state.nodes.items():
+                if name in ["ROOT", "Start", new_name]: continue
+                
+                score = cosine_similarity(input_vec, node["vector"])
+                if score > best_global_score:
+                    best_global_score = score
+                    best_global = name
+
+        # C. Decision Logic
+        # Thresholds
+        STRONG_MATCH = 0.68  # Lowered to catch more obvious connections
+        WEAK_MATCH = 0.55    # Lowered to allow LLM to judge more cases
+        
+        parent_node = "Start" # Default
+        
+        # 1. Prefer Ancestor if it's strong
+        if best_ancestor and best_anc_score > STRONG_MATCH:
             parent_node = best_ancestor
-            st.toast(f"Filed under: {parent_node} (Score: {best_score:.2f})", icon="📂")
+            st.toast(f"Kept Context: {parent_node}", icon="🔗")
+            
+        # 2. Switch to Global if it's strong and better than ancestor
+        elif best_global and best_global_score > STRONG_MATCH and best_global_score > best_anc_score:
+            parent_node = best_global
+            st.toast(f"Re-routed to: {parent_node}", icon="twisted_rightwards_arrows")
+            
+        # 3. Gray Zone: Check the BETTER of the two (Global vs Ancestor)
         else:
-            parent_node = "Start"
-            st.toast(f"New Top-Level Topic: {new_name}", icon="🌿")
+            # Pick the candidate with the higher score
+            if best_global and best_global_score > best_anc_score:
+                candidate = best_global
+                score = best_global_score
+                is_global = True
+            else:
+                candidate = best_ancestor
+                score = best_anc_score
+                is_global = False
+            
+            # If candidate is decent (> WEAK_MATCH), ask LLM
+            if candidate and score > WEAK_MATCH:
+                 try:
+                     check_prompt = f"""
+                     Is the new topic '{new_name}' a sub-topic or directly related to '{candidate}'?
+                     Answer YES or NO.
+                     """
+                     check_resp = model.generate_content(check_prompt).text.strip().upper()
+                     
+                     if "YES" in check_resp:
+                         parent_node = candidate
+                         if is_global:
+                             st.toast(f"Global Context Found: {parent_node}", icon="🌍")
+                         else:
+                             st.toast(f"Verified Context: {parent_node}", icon="✅")
+                     else:
+                         st.toast(f"Context Rejected: {candidate}", icon="🚫")
+                 except:
+                     pass
+             
+        # 4. Fallback: New Topic (Start)
+        if parent_node == "Start":
+             st.toast(f"New Topic Created: {new_name}", icon="🌿")
 
         # INDEXING STEP
         # Path-Awareness: Inherit parent name for better vector search later
