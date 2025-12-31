@@ -218,20 +218,22 @@ def route_topic(user_input, current_branch, all_branches):
     # 3. Calculate Drift (Math only)
     raw_relevance = cosine_similarity(input_vec, current_vec)
 
-    # INERTIA LOGIC (The Fix):
-    # If we are deep in a topic (not in Start/ROOT), give a "Home Court Advantage".
-    # This prevents specific details (e.g. "Toyota") from drifting out of general topics ("Car Repair").
-    if current_branch not in ["ROOT", "Start"]:
-        # Add a 15% bonus to sticking with the current topic
-        relevance = min(1.0, raw_relevance + 0.15)
+    # ---------------------------------------------------------
+    # CONDITIONAL INERTIA (The Fix)
+    # Only give a boost if the topic is ALREADY somewhat related (> 0.45).
+    # This helps "Tent" (0.55 -> 0.65) stick,
+    # but stops "Python" (0.20) from getting a free pass.
+    # ---------------------------------------------------------
+    if current_branch not in ["ROOT", "Start"] and raw_relevance > 0.45:
+        relevance = min(1.0, raw_relevance + 0.10) # Lower boost to +0.10
     else:
         relevance = raw_relevance
 
     instant_drift = 1.0 - relevance
 
-    # Apply MOMENTUM (Exponential Moving Average)
+    # Apply Momentum (EMA) for UI Stability
     prev_drift = st.session_state.get("last_drift_score", 0.0)
-    alpha = 0.3 # 30% new info, 70% history
+    alpha = 0.3
     smoothed_drift = (prev_drift * (1 - alpha)) + (instant_drift * alpha)
 
     st.session_state.last_drift_score = smoothed_drift
@@ -240,33 +242,32 @@ def route_topic(user_input, current_branch, all_branches):
     from ddtrace import tracer
     tracer.current_span().set_metric("arbor.drift_score", smoothed_drift)
 
-    # 4. Decision Logic (Same Tuned Thresholds)
-    if relevance > 0.6:
+    # 4. DECISION LOGIC (Stricter Thresholds)
+
+    # STRICTER STAY THRESHOLD: Raised to 0.60
+    if relevance > 0.60:
         return "STAY"
 
-    # Search the Index
+    # Search for Switches
     best_match = None
     best_score = -1.0
 
     for branch in all_branches:
         if branch == "ROOT" or branch == current_branch: continue
-
-        # RETRIEVE FROM INDEX (Fast!)
         branch_vec = st.session_state.nodes[branch].get("vector")
-
-        # Safety check if vector is missing
         if branch_vec is None: continue
 
         score = cosine_similarity(input_vec, branch_vec)
-
         if score > best_score:
             best_score = score
             best_match = branch
 
-    if best_score > 0.55:
+    # STRICTER SWITCH THRESHOLD: Raised to 0.65
+    if best_score > 0.65:
         return f"SWITCH:{best_match}"
 
-    # Fallback to Name Generation
+    # If we are here, it's definitely a NEW topic.
+    # Generate a name.
     name_prompt = f"Name the topic of this input in 2-3 words: '{user_input}'"
     new_name = model.generate_content(name_prompt).text.strip()
 
