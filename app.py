@@ -229,11 +229,23 @@ def route_topic(user_input, current_branch, all_branches):
     else:
         relevance = raw_relevance
 
+    # PENALTY BOX (The Fix):
+    # If relevance drops below 0.5, it's likely a complete context switch.
+    # Punish it heavily to alert the user.
+    if relevance < 0.5:
+        relevance = 0.0
+
     instant_drift = 1.0 - relevance
 
-    # Apply Momentum (EMA) for UI Stability
+    # ADAPTIVE MOMENTUM (Exponential Moving Average)
+    # Trust is hard to gain (0.2) but easy to lose (0.7).
     prev_drift = st.session_state.get("last_drift_score", 0.0)
-    alpha = 0.3
+
+    if instant_drift > prev_drift:
+        alpha = 0.7 # Fast drop
+    else:
+        alpha = 0.2 # Slow recovery
+
     smoothed_drift = (prev_drift * (1 - alpha)) + (instant_drift * alpha)
 
     st.session_state.last_drift_score = smoothed_drift
